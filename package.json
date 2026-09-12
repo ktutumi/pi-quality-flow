@@ -1,0 +1,27 @@
+{
+  "name": "pi-quality-flow",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Pi extension: General Advisor + Japanese Direct Formatter (Phase 0A contract scaffold)",
+  "scripts": {
+    "test": "node --test test/",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "typescript": "^5.6.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  }
+}
