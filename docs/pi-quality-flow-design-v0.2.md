@@ -1,13 +1,15 @@
 # pi-quality-flow 設計書
 
+> 更新日時: 2026-09-13 03:22
+
 **作成日:** 2026-09-12  
 **改訂日:** 2026-09-13  
-**設計バージョン:** 0.2（レビュー反映版）  
-**状態:** 設計草案。Pi / provider / CLI の実装・適合試験は未実施  
+**設計バージョン:** 0.2（レビュー反映版、初回リリースの設計合意済み）\
+**状態:** Phase 0A〜1 の設計合意済み。Phase 2 以降は草案。Pi / provider / CLI の実装と適合試験は未実施\
 **対象:** Pi coding agent / `jp-quality-gate` / General Advisor / Gemini Japanese Formatter  
 **仮パッケージ名:** `pi-quality-flow`
 
-> 本版は添付原設計書と直前のレビュー提案に基づく改訂である。既存の第1〜57章と Appendix A/B を維持し、変更対応表と未検証事項を Appendix C/D に追加した。疑似コードの内部 API・新しい設定項目・初期予算値は設計上の提案であり、upstream の現行実装や動作確認済みの仕様と混同しない。
+> 本版の基礎は添付原設計書と直前のレビュー提案に基づく改訂である。既存の第1〜57章と Appendix A/B を維持し、変更対応表と未検証事項を Appendix C/D に追加した。その後の設計インタビューで合意した内容を本文に反映している。疑似コードの内部 API、新しい設定項目、初期予算値は設計上の提案であり、upstream の現行実装や動作確認済みの仕様と混同しない。
 
 ### 改訂概要
 
@@ -39,6 +41,10 @@ Advisor / jp-quality-gate → 指摘 → Executor → 全文再生成 → 再指
 2. **Japanese Formatter:** `jp-quality-gate` と Gemini Flash 等を使い、最終 assistant message の編集可能な日本語部分を直接修正する。Executor に日本語 correction prompt を送らない。
 
 日本語の自然さの改善は、技術的意味を維持することを目的とする。ただし、**構造の完全保持と一般的な意味同値性は別**である。前者は機械的に検証し、後者は最小修正・危険な変更の拒否・評価用コーパスによってリスクを低減する。意味同値性を完全に証明する設計とはしない。
+
+本書の `candidate` は、[用語集](../CONTEXT.md)に定義する「回答候補」を指す。
+Formatter が返した本文は「修正案」、原文と修正案から最終的に選んだ本文は「採用本文」と呼び分ける。
+修正案を採用しても回答候補の同一性は変わらない。
 
 ---
 
@@ -74,8 +80,8 @@ Final Output + 独立した検証状態・provenance
 ### 最重要方針
 
 - Advisor の **言語表現だけの feedback** を Executor に戻さない。日本語に関係していても、実行や仕様を壊す問題は technical review の対象とする。
-- Formatter は Executor に修正を依頼せず、モデルへの本文整形要求は候補ごとに最大1回とする。
-- `candidateId` は候補の同一性、`inputHash` / `outputHash` は本文の記録・検証を表す。本文 hash だけでレビューを再利用しない。
+- Formatter は Executor に修正を依頼せず、モデルへの本文整形要求は回答候補ごとに最大1回とする。
+- `candidateId` は回答候補の同一性、`inputHash` / `outputHash` は原文と採用本文の記録・検証を表す。本文 hash だけでレビューを再利用しない。
 - `jp-quality-gate` の PASS より先に、出力完全性・不変条件・新規禁止診断・quality regression を評価する。
 - Formatter backend は履歴・指示・ファイル・ツールを隔離する。`tools: []` や会話 ID の変更だけで隔離済みと判断しない。
 - Antigravity Bridge は無条件の標準 backend とせず、専用 adapter の適合試験を通った構成だけを利用する。
@@ -88,16 +94,27 @@ Final Output + 独立した検証状態・provenance
 
 ### 3.1 対象
 
+最初の独立したリリースは Phase 1 の Japanese Direct Formatter とする。
+General Advisor の統合は Phase 2 とし、初回リリースの完了条件に含めない。
 MVP の最終形は次を対象とする。実装順は第49章を参照する。
 
 - Pi の正常完了した最終 assistant response。
 - General Advisor と上限付き technical correction loop。
 - `jp-quality-gate` CLI による日本語品質検証。
 - `tech-minimal` profile による局所的な日本語修正。
-- 適合確認済みの通常の生成 API backend。モデルは Gemini Flash を第一候補とするが provider / model ID は固定しない。
+- 適合確認済みの通常の生成 API backend。初回は Google Gemini API の Flash 系1モデルに限定し、具体的な model ID は適合試験時に固定する。
 - TUI / headless / RPC での最終出力の整合性と、障害時に原文を維持する動作。
 
 Formatter の対象は、**非空の text block が1つで、toolCall を含まない assistant message** に限定する。複数 text block は Advisor の対象にはできるが、MVP の自動 Formatter は skip する。thinking 等の非 text block は保持し、Formatter に渡さない。
+
+初回の自動処理は、対象 text block の原文が UTF-8 で8 KiB（8192 bytes）以内の場合に限定する。
+超過時は候補全体を skip して原文を維持する。
+sentinel 化後の request 上限と、CLI 自体の入力上限は、原文の上限とは別に検証する。
+
+初回リリースでは、明らかな誤字、文字混入、意味関係を変えない明確な助詞誤りの改善を必須成果とする。
+非機密の実例に人が期待結果を付け、改善率の合格基準を定めて評価する。
+gate の検出件数だけで改善を判定せず、文体の好みは必須成果に含めない。
+評価対象と改善率の数値基準は第46.3章で具体化する。
 
 ### 3.2 MVP では対象外
 
@@ -110,7 +127,20 @@ Formatter の対象は、**非空の text block が1つで、toolCall を含ま�
 - 未修正の streaming text を一度も外部に出さない保証。
 - tool-less / history-less が未確認の agentic backend の自動利用。
 
-Antigravity 専用 adapter は、Phase 0A の隔離条件を満たせれば Phase 1 で有効化できる。未確認なら通常の生成 API backend だけで進め、未検証の Bridge へ自動 fallback しない。
+Antigravity 専用 adapter は後続版の対象とし、初回リリースには含めない。
+後続版でも専用の適合試験に合格した構成だけを有効化し、未検証の Bridge へ自動 fallback しない。
+
+### 3.3 今回確定する設計の範囲
+
+今回の設計インタビューは、Phase 0A〜1 を実装開始できる仕様にすることを完了範囲とする。
+2026-09-13 に14項目の合意内容についてユーザーが最終確認し、この範囲の設計インタビューを完了した。
+初回リリースの仕様は Japanese Pipeline、Pi の本文置換、必要な設定と観測性、適合試験、改善評価を対象とする。
+モデルの具体的な ID、CLI binary digest、評価例、実測値は実装時の適合記録に固定し、未検証のまま有効化しない。
+
+Phase 2 以降は責務と接続点を維持し、詳細は未確定の設計案として残す。
+第8〜10章、第24〜26章、第42章、第43.1〜43.2章、第45章の Advisor 固有の型、予算、制御は初回実装の必須仕様ではない。
+Advisor では日本語表現だけの指摘を Executor に返さず、技術レビューが必要な場合は Formatter より先に完了させる責務境界を維持する。
+live review、workspace snapshot、指摘の同一性、user run 全体の予算は、Phase 2 着手前の別の設計ラウンドで確定する。
 
 ---
 
@@ -193,6 +223,9 @@ message_end → turn_end → agent_end → agent_settled
 
 原設計が想定した public API を引き続き使うが、**利用可能性・型・キャンセル・保存動作は Phase 0A の契約試験で固定する**。本書の内部型や adapter method は Pi の実在 API を意味しない。
 
+初回の適合対象は `@earendil-works/pi-coding-agent` 0.85.1 に固定する。
+他の版は契約試験に合格してから対応対象へ追加する。
+
 ### 6.1 `message_end`
 
 対象 Pi で次の返却が最終 message の置換として機能することを確認する。
@@ -205,11 +238,14 @@ return { message: correctedMessage };
 
 互換性がない場合は Formatter を無効化して原文を維持する。日本語の steer correction や保存セッションの直接改変へ自動 fallback しない。
 
-### 6.2 `ctx.modelRegistry.streamSimple()`
+### 6.2 ModelRegistry の生成 API
 
-通常の生成 API backend の実装候補として利用する。登録 provider を呼べることと、その provider が tool-less / history-less であることは別の条件である。
+`ctx.modelRegistry.streamSimple()` は原設計の実装候補である。
+導入版 Pi 0.85.1 の静的調査では `ModelRegistry.complete()` が提供されており、同じ method 名を前提にできない（Appendix D.4）。
+初回は `ctx.modelRegistry.complete()` を使う adapter を実装し、5面一致と中断を実測する。
+登録 provider を呼べることと、その provider が tool-less / history-less であることは別の条件である。
 
-adapter は stream の最終結果を取得し、正常完了理由、toolCall の不存在、出力サイズ等を確認する。throw だけでなく error result / 異常終了も失敗に変換する。API の具体的な結果型と取り出し方は対象バージョンで確認する。
+adapter は生成の最終結果を取得し、正常完了理由、toolCall の不存在、出力サイズ等を確認する。throw だけでなく error result / 異常終了も失敗に変換する。API の具体的な結果型と取り出し方は対象バージョンで確認する。
 
 ### 6.3 `turn_end`
 
@@ -354,7 +390,8 @@ interface QualityFlowState {
 
 `candidateId` は session epoch / run / turn / candidate sequence または host の安定 ID から決める。**text hash から生成しない。** `message_end` と `turn_end` は PiAdapter の event mapping で同じ candidate を参照する。置換時に object identity が変わることも想定する。
 
-`inputHash` は Executor 原文、`outputHash` は採用後本文の UTF-8 byte 列の SHA-256 とする。Formatter の A → B への変更は同じ candidate 内の変換であり、新しい technical candidate としない。
+`inputHash` は Executor 原文、`outputHash` は採用本文の UTF-8 byte 列の SHA-256 とする。
+修正案を採用して本文が A → B に変わっても、同じ回答候補内の変換であり、新しい回答候補としない。
 
 同じ本文でも、コード・tool result・transcript・設定が変われば別のレビュー対象である。MVP では candidate をまたぐ Advisor 結果の再利用を行わない。
 
@@ -364,7 +401,7 @@ interface QualityFlowState {
 
 `workspaceRevision` は「Git HEAD だけ」ではない。レビュー対象の未コミット差分・未追跡ファイル・関連 tool result 等を含む変更検知用の digest を設計する。外部エディタ等による変更が検出された場合も結果を stale とする。範囲外のファイルまで変更検知できると主張しない。
 
-取得範囲・巨大 workspace の上限・取得失敗時の扱いは Phase 0B で固定する。必要な snapshot が確定できなければ技術レビューは `unavailable` とし、別候補の結果を流用しない。
+取得範囲・巨大 workspace の上限・取得失敗時の扱いは Phase 2 で固定する。必要な snapshot が確定できなければ技術レビューは `unavailable` とし、別候補の結果を流用しない。
 
 ### 8.4 atomic commit
 
@@ -578,6 +615,9 @@ Gemini 等        = Formatter
 
 検出結果は自然な日本語や意味同値性の証明ではない。モデル障害時の local fallback は**原文に対する検証**であり、CLI が自動修正できるという意味ではない。対応する CLI の検出機能は Phase 0A の fixture で確認する。
 
+初回の自動処理は Unihan と CJClassifier に限定する。
+textlint / natural-japanese は初回の自動処理で無効とし、後続版で外部プロセス、設定、診断の位置精度を個別に適合確認して追加する。
+
 ---
 
 ## 15. `jp-quality-gate` の実行
@@ -611,9 +651,18 @@ interface GateReport {
 
 各 rule の正規化、exit code と `status` の対応、severity の集計方法を adapter fixture に定義する。不正 JSON、schema 不一致、exit と payload の矛盾、未知の version は internal error とする。
 
+初回は Appendix D.4 の現行 CLI を使う。
+Unihan 診断は最大50件であり、打切りの有無を示す field がないため、pre または post の Unihan 診断が50件に達したら `gate-diagnostics-incomplete` とする。
+pre で判明した場合は Formatter を起動せず、post で判明した場合は修正版を不採用にし、どちらも原文を維持する。
+件数は他の検査を含む総診断数と混同せず、対応版の rule と出力を fixture で確認する。
+診断の完全性を明示する CLI 契約の拡張は、別の改善として扱う。
+
 ### 15.2 実行・サイズ制限
 
 shell 文字列で組み立てず、検証済み executable と args を直接 spawn し、stdin に本文を送る。暗黙の project config 読み込み、plugin loader、環境変数経由の設定注入の有無も確認する。
+
+初回の自動実行では optional lint を明示的に無効化し、`JPQG_TEXTLINT` / `JPQG_NATURAL_JAPANESE` 等の環境変数からも有効化されない実行条件を固定する。
+project の args から optional lint を有効化する構成も初回の適合対象に含めない。
 
 初期の上限案は input 128 KiB、stdout 256 KiB、stderr 16 KiB、1回30秒。上限超過時はプロセスを終了し、切り詰めた本文や JSON を成功扱いしない。数字は実測から調整する設定値である。
 
@@ -655,6 +704,8 @@ diagnostic の identity は rule ID / segment ID / 正規化された issue key 
 
 安定した照合ができない場合は、保守的に拒否または `gate-scope-unmappable` とし、新規 error なしと推定しない。件数比較と新規診断比較は異なる検査として記録する。
 
+第15.1章の診断上限に達した結果は、score や multiset が全文を表さない可能性があるため比較に使わない。
+
 ---
 
 ## 17. Formatter の output adoption
@@ -668,11 +719,11 @@ diagnostic の identity は rule ID / segment ID / 正規化された issue key 
 | 1 | cancelled / stale / deadline 到達 | 採用しない。以後の処理を開始しない |
 | 2 | 異常終了、`length`、空出力、toolCall、サイズ超過 | original / incomplete-or-invalid-output |
 | 3 | protected span / structure / semantic-risk 検査に不合格 | original / unsafe-rewrite |
-| 4 | pre/post gate が不正、比較 policy 不一致、診断の対応付け不能 | original / gate-unusable |
+| 4 | pre/post gate が不正、診断の完全性が不明、比較 policy 不一致、診断の対応付け不能 | original / gate-unusable |
 | 5 | 新規 error、または `forbidNewRules` の新規診断 | original / new-forbidden-diagnostic |
 | 6 | post score が pre より悪い | original / quality-regression |
-| 7 | post PASS、かつここまでの検査に合格 | candidate を採用。原文と同一なら unchanged |
-| 8 | post FAIL、score 改善、`acceptImprovement=true` | candidate を採用。残存問題ありと記録 |
+| 7 | post PASS、かつここまでの検査に合格 | 修正案を採用。原文と同一なら unchanged |
+| 8 | post FAIL、score 改善、`acceptImprovement=true` | 修正案を採用。残存問題ありと記録 |
 | 9 | その他 | original / no-acceptable-improvement |
 
 MVP は `rejectStructuralRegression=true`、`rejectQualityRegression=true`、`rejectNewErrors=true` を必須とし、false への緩和は設定検証で拒否する。`acceptImprovement` は切り替え可能。
@@ -695,7 +746,10 @@ MVP は `rejectStructuralRegression=true`、`rejectQualityRegression=true`、`re
 
 ### 17.3 実装規範
 
-採用した本文の検証状態と、比較に使った候補の検証状態は分ける。原文へ戻す場合の selected-output 検証結果は pre、修正版を採用する場合は post とする。拒否した修正版の post PASS を、原文の PASS として表示しない。pre/post の比較結果は別の audit 情報に残す。
+採用本文の検証状態と、比較に使った修正案の検証状態は分ける。
+原文を採用本文にする場合の検証結果は pre、修正案を採用する場合は post とする。
+不採用にした修正案の post PASS を、原文の PASS として表示しない。
+pre/post の比較結果は別の audit 情報に残す。
 
 判定は副作用のない `decideAdoption()` に集約する。config、command、pipeline ごとに別ロジックを書かない。決定表の全行・境界値・複数条件の同時成立を unit test にする。
 
@@ -707,7 +761,7 @@ MVP は `rejectStructuralRegression=true`、`rejectQualityRegression=true`、`re
 { "maxPasses": 1 }
 ```
 
-MVP は candidate あたり `0` または `1` request。`maxPasses` に1以外を設定する構成はサポートしない。修正版が gate に通らなくても semantic retry を行わない。
+MVP は回答候補あたり `0` または `1` request。`maxPasses` に1以外を設定する構成はサポートしない。修正案が gate に通らなくても semantic retry を行わない。
 
 Formatter attempt は request を開始する前に candidate に記録する。並行 event、再入、同一候補の fallback で再要求しない。backend 内の隠れた agent loop や application-level retry が存在する構成を「1 pass」と数えて済ませない。
 
@@ -759,7 +813,7 @@ interface FormatterBackend {
 
 ### 19.3 推奨 backend
 
-**第一段階は通常の生成 API backend** とする。fresh context、system instructions、空の tools、repository 非接続、キャンセル、終了理由を adapter で確認する。`ctx.modelRegistry.streamSimple()` はその実装方法の一つ。
+**第一段階は通常の生成 API backend** とする。fresh context、system instructions、空の tools、repository 非接続、キャンセル、終了理由を adapter で確認する。初回の Pi 0.85.1 adapter は `ctx.modelRegistry.complete()` を使う。
 
 Antigravity Bridge は専用の `antigravity-isolated` adapter でのみ採用可能。外側の tools を空にしても、backend 内の会話履歴・native tools・MCP・暗黙の設定読み込みが残る可能性を前提に試験する。隔離が実現できなければその adapter を無効のままにする。
 
@@ -776,6 +830,11 @@ provider / model ID をコードに固定しない。導入先 Pi の model disc
 
 モデルの解決、backend の適合性、送信許可の3条件を別々に確認する。未解決時に別クラウド・別モデルへ自動 fallback しない。
 
+初回の適合対象は Google Gemini API の Flash 系1モデルとする。
+具体的な model ID を適合試験時に固定し、意味保持と遅延をその構成で評価する。
+Flash 系という名称だけで別モデルへ切り替えず、対応モデルの追加には同じ適合試験を要求する。
+外部送信を許可していない環境ではローカル検証だけを提供し、初回は local Formatter を追加しない。
+
 ---
 
 ## 20. Japanese Formatter Prompt
@@ -791,12 +850,14 @@ MVP は `tech-minimal` profile とし、頻度設定の `always` でも修正範
 
 修正可能:
 - 編集可能本文に含まれる明らかな文字混入・誤字
-- 局所的な助詞の誤り
+- 許可助詞パターンに一致する、意味関係を変えない明確な助詞の誤り
 - 許可された用語辞書に一致する置換
 - 文の論理構造を変えない小さな語句の修正
 
 変更禁止:
 - 否定、条件、比較、因果関係、必須／任意、推奨度、確信度
+- 主体や対象の関係が変わり得る助詞の修正
+- 許可助詞パターンにない助詞の変更
 - 技術的結論、数値、コード、コマンド、API 名、識別子
 - URL、path、version、固有名詞、引用された原文
 - protected sentinel の内容・個数・順序・配置
@@ -839,7 +900,11 @@ Markdown の構造解析と source range を用いて、変更禁止部分を原
 「方案」という表現が出力される問題を修正しました。
 ```
 
-二重引用符等の曖昧な quoted text、未閉じの code fence、未知の引用 marker は、確実な対応が実装されるまでは変更対象から外すか候補全体を skip する。正規表現だけで対応する token の範囲は限定する。
+初回は CommonMark の通常の Markdown と、GFM の表および task list を対応範囲とする。
+二重引用符等の曖昧な quoted text、未閉じの code fence、未知の引用 marker、未対応の拡張構文が一つでもあれば、候補全体を skip して原文を維持する。
+不明な部分だけを保護して残りを修正する処理は初回に含めない。
+raw HTML は対応を確認した code / pre 等を保護し、構造や出所が不明な場合は同じく候補全体を skip する。
+対応する構造と skip する構造の境界は fixture で固定する。
 
 ### 21.2 Sentinel
 
@@ -874,7 +939,8 @@ JS 内部の UTF-16 offset と CLI の byte / code point 座標を混同しな�
 | 引用 / ログ / 原文例 / citation marker | 内容と参照先を保持 |
 | Markdown | 見出し・list・table・block 境界と対応関係を維持 |
 
-「推奨」ではなく MVP の採用条件とする。ただし、無制限な自然言語からすべての固有名詞・識別子を完全検出できるとは主張しない。対応 token 規則・用語辞書・未対応構造を明示し、不明な範囲は保守的に保護する。
+「推奨」ではなく MVP の採用条件とする。ただし、無制限な自然言語からすべての固有名詞・識別子を完全検出できるとは主張しない。対応 token 規則、用語辞書、未対応構造を明示する。
+初回は構造や保護範囲を確定できなければ、第21.1章に従って候補全体を skip する。
 
 strictness を緩和する profile は将来拡張。MVP の設定でコード・数値保護や structural rejection を off にしない。
 
@@ -889,6 +955,14 @@ strictness を緩和する profile は将来拡張。MVP の設定でコード�
 ```
 
 diff に対して、否定・条件・比較・因果・必須／任意・有効／無効・確信度等の変更を危険信号として検査する。文・段落の追加削除や再配置、局所修正と判断できない広範な書き換えも拒否する。
+
+初回リリースでは、主体や対象の関係が変わり得る助詞修正を拒否する。
+例えば「A が B を削除する」から「A を B が削除する」への変更は、保護対象の名前や否定語が同じでも意味が変わるため採用しない。
+助詞修正は、[用語集](../CONTEXT.md)に定義する許可助詞パターンに限定する。
+例えば「設定のの変更 → 設定の変更」のような修正を、期待結果付きの評価例とともに登録する。
+未登録の助詞変更を含む修正案は全文を不採用にし、安全そうな部分だけを抜き出して採用しない。
+許可助詞パターンの追加には評価例を必須とする。
+この制限を選んだ理由は [ADR 0001](adr/0001-restrict-particle-rewrites.md) に記録する。
 
 risk rule / 変更量上限 / 文境界判定は Phase 0B のコーパスで固定し、profile version に含める。一般的な意味同値性を判定できるという保証は置かない。検査が曖昧なら原文を維持する。
 
@@ -923,7 +997,7 @@ streaming delta は暫定版であり、Formatter 前のテキストが表示・
 
 最終版の契約は `message_end.message`。TUI 最終表示、RPC 最終 event、`turn_end.message`、保存セッション、次ターン context の5つで置換結果の一致を確認する。RPC client は delta の追加だけで済ませず、対応する final message で表示を確定する設計とする。
 
-PiAdapter は原文と置換後 message を同じ candidateId に関連付ける。候補本文を書き換えても、二重 Advisor review の起点にしない。
+PiAdapter は原文と置換後 message を同じ candidateId に関連付ける。回答候補の本文を書き換えても、二重 Advisor review の起点にしない。
 
 ### 23.3 Provenance
 
@@ -1107,6 +1181,10 @@ technical correction rounds を消費
 
 project 設定は PiAdapter で trust を確認してから読む。trust を確認できない場合は global 設定だけを使う。
 
+初回の設定は finalization、security、japanese、ui、debug と、Advisor を無効にする指定を対象とする。
+以下の Advisor の詳細設定は Phase 2 の案として残し、初回にその制御を実装しない。
+初回は `advisor.enabled=true` を受け付けず、未実装の機能を有効として表示しない。
+
 ### 27.1 設定例
 
 以下は改訂 schema の例。placeholder を実モデルへ置換し、global の許可と適合試験を完了するまで自動モデル呼び出しは行わない。
@@ -1150,6 +1228,8 @@ project 設定は PiAdapter で trust を確認してから読む。trust を確
   },
   "japanese": {
     "enabled": true,
+    "deadlineMs": 10000,
+    "maxSourceBytes": 8192,
     "mode": "always",
     "profile": "tech-minimal",
     "model": {
@@ -1200,6 +1280,10 @@ project 設定は PiAdapter で trust を確認してから読む。trust を確
 `allowedModels` は role 別の `provider/modelId` の allowlist。空配列は全モデル不許可を意味する。remote model を使う場合は、ユーザーが global 設定で `cloudEgress=allow` と実モデルの許可を明示する。local model でも role 別 allowlist は必要。
 
 `thinkingLevel` は当該モデルが対応するときだけ設定する。未対応値を勝手に別モデルの指定に読み替えない。`forbidNewRules` は任意の追加拒否 rule であり、空でも `rejectNewErrors=true` は有効。
+
+`japanese.maxSourceBytes` は自動処理の対象となる原文の上限であり、初回は8192 bytesを超える設定を受け付けない。
+`formatter.maxInputBytes` は保護処理後の request、`gate.maxInputBytes` は CLI 入力の上限であり、原文の上限を拡大する設定ではない。
+外部送信が不許可の場合、設定上の mode が `always` / `gate` でもモデルを呼ばず、ローカル検証の結果と不許可の状態を表示する。
 
 ### 27.2 解決順と制約
 
@@ -1272,6 +1356,8 @@ status には model の値だけでなく設定の出所を表示する。未解
 
 ON / OFF や mode の変更は configRevision と in-flight invalidation に反映する。OFF にした直後に旧結果が返ってきても適用しない。command によってクラウド送信許可が暗黙に変更されることはない。
 
+初回は Advisor を起動する command を登録せず、status に Advisor が初回リリースの対象外であることを示す。
+
 Phase 4 で `/quality japanese check README.md` を追加する場合も、read-only check と file formatting は別コマンド・別権限にする。
 
 ---
@@ -1317,12 +1403,19 @@ CJK のみでも中国語混入の可能性があるため、軽量判定だけ�
 | Advisor final barrier | 60000 ms |
 | jp-quality-gate 1回 | 30000 ms |
 | Formatter 1回 | 60000 ms |
+| 日本語処理全体 | 10000 ms |
 | candidate の finalization 全体 | 90000 ms |
 | run 内 Advisor の累積 | 120000 ms |
 
 個別上限だけでは最大 60 + 30 + 60 + 30 = 180 秒になり得るため、terminal `message_end` で全体 deadline を開始する。各 stage の許可時間は、個別上限・残り deadline・該当 run budget の最小値とする。
 
 全体 deadline が切れたら新しい stage を開始しない。90秒は処理予算であり、OS の強制終了処理や UI の配送遅延まで含めた厳密な wall-clock SLA ではない。
+
+日本語処理には `japanese.deadlineMs=10000` の独立した上限を設ける。
+編集可能範囲の解析開始から採用判断までを対象とし、pre gate、Formatter、post gate を合わせて10秒で打ち切り、原文を維持する。
+各 stage は個別上限、candidate の残り時間、日本語処理の残り時間の最小値を使う。
+日本語処理の追加遅延は p95 5秒以内を仮目標とし、10秒の打切りとともに実測で見直す。
+Advisor と Executor の技術修正を含む user run 全体の待ち時間上限は未決定であり、candidate の90秒とは別に定める。
 
 ### 32.2 user cancel と timeout の分離
 
@@ -1563,7 +1656,8 @@ type FormatterFailure =
   | "empty-output" | "incomplete-output" | "tool-call-output"
   | "output-too-large" | "sentinel-invalid" | "structural-regression"
   | "semantic-risk" | "gate-regression" | "new-forbidden-diagnostic"
-  | "gate-internal-error" | "gate-scope-unmappable" | "config-error";
+  | "gate-internal-error" | "gate-scope-unmappable"
+  | "gate-diagnostics-incomplete" | "config-error";
 ```
 
 | 状態 | Output / 動作 |
@@ -1604,6 +1698,16 @@ MVP は fail-open のみを実装対象とし、未実装の fail-closed 設定�
 ## 43. Pseudocode
 
 以下は制御・責務を示す TypeScript 風の疑似コード。**PiAdapter / Coordinator / task / backend の method は本設計の内部契約であり、Pi の実在 method の一覧や、そのまま実行できる実装ではない。** 実 API への対応は Phase 0A で確定する。
+
+### 43.0 初回リリースの処理
+
+Phase 1 は正常完了した単一 text block の回答を識別し、session / candidate / config の版と中断状態を固定して、第43.3章の Japanese Pipeline を実行する。
+各非同期処理の後と置換直前に有効性を再確認し、採用した text だけを同じ回答の本文へ置換する。
+回答候補ごとの Formatter 試行記録で最大1回を守り、原文と採用本文の hash および provenance を記録する。
+Advisor の review snapshot、workspace digest、技術修正予算、pending advice は用意しない。
+
+第43.1〜43.2章は Phase 2 の統合案であり、今回の確定対象に含めない。
+その型や関数を満たすためだけの空の Advisor 実装を Phase 1 に追加しない。
 
 ### 43.1 `message_end`
 
@@ -1751,6 +1855,10 @@ async function runJapanesePipeline(input): Promise<JapanesePipelineOutcome> {
     if (!cfg.gate.enabled && cfg.mode === "off") return skipped("all-off");
     if (!cfg.gate.enabled) return failed("config-error");
 
+    if (utf8ByteLength(text) > cfg.maxSourceBytes) {
+      return skipped("source-too-large");
+    }
+
     const doc = prepareEditableDocument(text, cfg.profile);
     if (!doc.supported) return skipped("unsupported-text-layout");
     if (!containsJapaneseOrCjk(doc.editableText)) {
@@ -1766,6 +1874,10 @@ async function runJapanesePipeline(input): Promise<JapanesePipelineOutcome> {
     if (cfg.mode === "off") return unchanged(text, "validation-only", pre);
     if (cfg.mode === "gate" && !shouldTriggerFormatter(pre, cfg.gate.trigger)) {
       return unchanged(text, "gate-not-triggered", pre);
+    }
+
+    if (!task.isFormatterEgressAllowed()) {
+      return unchanged(text, "egress-denied-validation-only", pre);
     }
 
     const backend = resolveApprovedCompatibleBackend(cfg);
@@ -1798,7 +1910,7 @@ async function runJapanesePipeline(input): Promise<JapanesePipelineOutcome> {
 
     return decideAdoption({
       original: text,
-      candidate: restored.text,
+      rewriteText: restored.text,
       pre,
       post,
       config: cfg.adoption,
@@ -1814,11 +1926,14 @@ async function runJapanesePipeline(input): Promise<JapanesePipelineOutcome> {
 
 `resolveApprovedCompatibleBackend()` は、task に固定した global policy / 承認済み registry を参照し、モデル解決だけでなく egress / allowlist / capability を確認する。渡された japanese config だけを権限の根拠にしない。モデル呼び出しを行う前に失敗を検出する。
 
+`runJapanesePipeline()` の入口で日本語処理の deadline を開始する。
+上記の `task` は第32章の candidate と日本語処理の残り時間を両方反映する内部契約であり、各 stage の個別 timeout だけで10秒の上限を代用しない。
+
 ### 43.4 採用関数の核心
 
 ```ts
 function decideAdoption(input): JapanesePipelineOutcome {
-  const { original, candidate, pre, post, config } = input;
+  const { original, rewriteText, pre, post, config } = input;
   // 呼び出し前の完了・構造・意味リスク検査に加え、比較可能性を再検証する。
   if (!comparableGatePolicies(pre, post)) return failed("gate-internal-error");
   if (hasNewForbiddenDiagnostics(pre, post, config)) {
@@ -1827,10 +1942,10 @@ function decideAdoption(input): JapanesePipelineOutcome {
 
   const order = compareGateScores(post.score, pre.score);
   if (order > 0) return failed("gate-regression");
-  if (candidate === original) return unchanged(original, "identical", pre);
-  if (post.status === "pass") return formatted(candidate, "post-pass", post);
+  if (rewriteText === original) return unchanged(original, "identical", pre);
+  if (post.status === "pass") return formatted(rewriteText, "post-pass", post);
   if (order < 0 && config.acceptImprovement) {
-    return formatted(candidate, "improved-with-residual-issues", post);
+    return formatted(rewriteText, "improved-with-residual-issues", post);
   }
   return unchanged(original, "no-acceptable-improvement", pre);
 }
@@ -1887,14 +2002,18 @@ source code や transcript 内の指示を tool permission の変更命令とし
 | terminal | stop のみ対象、length / toolUse / error / aborted / unknown は対象外 |
 | layout | 単一 text、複数 text、thinking 保持、non-text metadata 保持 |
 | scope | code-only / quote-only / English-only を skip、CJK-only の検証 |
+| supported syntax | CommonMark / GFM の表と task list、未知 marker / 曖昧な引用 / 未閉じ fence で候補全体を skip |
 | protector | 欠落・重複・改変・未知 sentinel、順序・所属 block の変更 |
 | structure | code / URL / path / version / number / CLI flag / citation を保持 |
 | Unicode | 絵文字・結合文字・CRLF・BOM・UTF-8 と UTF-16 座標変換 |
 | semantic risk | 否定・条件・比較・必須／任意・因果の変更を拒否 |
+| particle policy | 許可助詞パターンを評価例で検証し、未登録の助詞変更を含む修正案全体を拒否 |
 | gate | exit 0 / 1 / 2、未知 exit、signal、spawn・stdin 失敗、JSON/schema 不一致 |
 | gate scope | source map、同一 rule の複数発生、境界診断、policy digest 不一致 |
+| gate completeness | pre/post の Unihan 診断49件と50件の境界、他 rule を含む総数との区別、上限到達時の原文維持 |
 | adoption | 第17章の全行、post PASS でも warning 増加、同点 PASS の採用、原文採用時は pre を表示 |
 | settings | mode / enabled の全組合せ、global security override 禁止、不正設定 |
+| gate engines | 自動実行は Unihan / CJClassifier のみ、args / env で optional lint が有効にならない |
 | output | 空、length、toolCall、巨大 response、切り詰められた部分出力の拒否 |
 | cancellation | Advisor 中に cancel して Formatter を始めない、timeout を区別 |
 
@@ -1930,6 +2049,27 @@ mock provider / CLI を使い、Executor、Advisor、Formatter を別々に観�
 正常文、助詞修正、引用された誤表現、否定、比較、条件、バージョン指定、破壊的コマンドの説明を含む fixture を用意する。許可修正と禁止修正を対にして human-reviewed expected result を付ける。
 
 実際のモデルの非決定性を前提に、コード変更・prompt/profile変更・model変更時に再評価する。fixture 合格は一般的な意味同値性の証明ではない。
+
+初回リリースの評価には、非機密の実例から選んだ誤字、文字混入、明確な助詞誤りを含め、人が改善と認める期待結果を付ける。
+gate が検出しない誤りも評価対象とし、原文をすべて維持するだけでは改善の合格条件を満たさない。
+初回の評価は次の200例を各3回、合計600試行とする。
+
+| 分類 | 例数 | 試行数 | 合格条件 |
+|---|---:|---:|---|
+| 誤字 | 20 | 60 | 改善48試行以上（80%以上） |
+| 文字混入 | 20 | 60 | 改善48試行以上（80%以上） |
+| 許可助詞パターンの誤り | 20 | 60 | 改善48試行以上（80%以上） |
+| 正常文 | 40 | 120 | 不要な変更0件 |
+| 禁止修正を試す例 | 100 | 300 | 重大な意味変更と保護領域の変更の採用0件 |
+
+改善対象の分母は各分類の全60試行とし、timeout、skip、不採用、無変更を改善失敗に数える。
+モデルが出力した修正案だけでなく、pipeline の採用本文を人が確認した期待結果と照合する。
+評価例は初回の対応構造と原文8 KiBの範囲内から選び、対象外入力の skip 試験は別に行う。
+重大な意味変更と保護領域の変更の採用は、禁止修正の分類に限らず全600試行で0件を要求する。
+
+評価例で重大な意味変更を一つでも採用した構成は、初回リリースとして公開しない。
+主体や対象が反転する助詞変更を禁止修正に含める。
+この基準は評価した構成に対する公開判断であり、未知の文章を含む一般的な意味同値性の保証ではない。
 
 ---
 
@@ -1999,6 +2139,11 @@ Advisor による正当な technical correction は別枠で、同じ user run �
 
 性能評価では通常 latency / p95、reject 率、改善採用率、残存診断、追加 Executor turn、キャンセル後の実停止、送信 token を測る。数値目標は実測前に達成済みと表現しない。
 
+初回リリースの日本語処理は p95 5秒以内、打切り10秒を仮目標とする。
+原文が UTF-8 で1 / 4 / 8 KiBの入力群ごとに p95 を報告し、timeout、不採用、無変更の試行も測定に含める。
+実行環境と選択した model ID を固定して実測し、目標を見直す。
+具体的な試行数と評価入力は適合試験で固定し、現時点の性能実績を示す値とは扱わない。
+
 主目的は、日本語だけのために Main Executor が全文を1〜2回再生成する経路をなくすことである。
 
 ---
@@ -2009,13 +2154,16 @@ Advisor による正当な technical correction は別枠で、同じ user run �
 
 最小 scaffold、PiAdapter、mock provider、対応版の記録を先に作る。
 
-完了条件は、message replacement の5面一致、candidate mapping、steering、中断、model completion の取得、global trust / permissions、CLI schema の適合試験が成立すること。
+完了条件は、message replacement の5面一致、candidate mapping、中断、model completion の取得、global trust / permissions、CLI schema の適合試験が成立すること。
+steering の契約試験は Phase 2 に移す。
+Advisor 用の snapshot と技術修正予算も Phase 1 の前提にしない。
 
 通常 API backend を先に検証する。Antigravity は独立した適合項目とし、未合格でも通常 backend で次フェーズへ進める。Pi の direct replacement 自体が未確認なら自動 Formatter は有効にしない。
 
 ### Phase 0B — Safety Core / Scaffold
 
-config / command / runner、candidate identity / snapshot、atomic commit、cancellation、budgets、source ranges / protected spans、semantic-risk guard、採用決定表、privacy policy を実装する。
+config / command / runner、candidate identity、session / candidate / config の無効化、atomic commit、cancellation、candidate と日本語処理の deadline、source ranges / protected spans、semantic-risk guard、採用決定表、privacy policy を実装する。
+Advisor 固有の review snapshot、workspace の変更検知、技術修正予算、pending advice と配送制御は Phase 2 に移す。
 
 完了条件は、model を使わない unit test と mock integration test で第17章の採用判断・stale 排除・停止規則が成立し、`/quality status` と `/quality doctor` で未検証項目を正しく表示できること。
 
@@ -2023,11 +2171,15 @@ config / command / runner、candidate identity / snapshot、atomic commit、canc
 
 旧 Advisor と legacy JP Pi integration は外し、内蔵 Advisor も OFF にする。正常 terminal / single text block / `tech-minimal` / pre/post gate / direct replacement / 1 pass を独立完成させる。
 
-完了条件は、対象の日本語誤りを Executor 追加ターン0で修正でき、失敗時も追加ターン0、保存・次 context を含む最終本文が一致すること。表現修正だけでよいケースを実モデルで評価する。
+ここを最初の独立したリリースとする。
+完了条件は、対象の日本語誤りを Executor 追加ターン0で修正でき、失敗時も追加ターン0、保存・次 context を含む最終本文が一致すること。
+第46.3章の改善基準と意味保持の公開基準を満たし、第48章の遅延目標を実測して評価する。
 
 ### Phase 2 — Integrated General Advisor
 
-persistent Advisor、技術と言語の責務分離、structured completion、evidence validation、final barrier、candidate-scoped pending advice、bounded correction、live / final の統合を実装する。
+以下は未確定の範囲案であり、着手前に別の設計ラウンドを行う。
+persistent Advisor、review snapshot、workspace の変更検知、技術修正予算、技術と言語の責務分離、structured completion、evidence validation、final barrier、candidate-scoped pending advice、bounded correction、live / final の統合を対象とする。
+steering と技術修正予算の契約試験は、このフェーズの実装前に成立させる。
 
 完了条件は、技術問題だけが予算内で追加 Executor ターンを起動し、日本語処理は技術レビュー後に1回だけ実行されること。unavailable / exhausted / cancelled を clean と混同しないこと。
 
@@ -2087,24 +2239,20 @@ technical correction 上限、language filtering、candidate mapping、cancel、
 
 ## 51. Recommended Defaults
 
-第27章を完全な設定例とし、ここでは主要な default を再掲する。Phase 1 だけは `advisor.enabled=false` にする。
+ここでは初回リリースの主要な default を示す。
+`advisor.enabled=false` とし、Advisor 固有の設定を実装の前提にしない。
+第27章の Advisor の詳細設定値は Phase 2 の設計ラウンドで再検討する。
 
 ```json
 {
   "finalization": { "deadlineMs": 90000 },
   "advisor": {
-    "enabled": true,
-    "blockOn": ["concern", "blocker"],
-    "dropLanguageAdvice": true,
-    "maxTechnicalCorrectionRounds": 2,
-    "maxSameFindingResends": 1,
-    "maxReviewCallsPerRun": 8,
-    "totalReviewBudgetMs": 120000,
-    "failurePolicy": "fail-open",
-    "onBudgetExhausted": "record-unresolved"
+    "enabled": false
   },
   "japanese": {
     "enabled": true,
+    "deadlineMs": 10000,
+    "maxSourceBytes": 8192,
     "mode": "always",
     "profile": "tech-minimal",
     "formatter": { "backend": "stateless-api", "maxPasses": 1 },
@@ -2128,6 +2276,9 @@ technical correction 上限、language filtering、candidate mapping、cancel、
 
 ## 52. Acceptance Criteria
 
+初回リリースは以下の Japanese Formatter と、Integration / Security / Observability の Formatter に必要な項目を対象とする。
+Advisor、review snapshot、technical steer とその予算に関する項目は Phase 2 の案として残す。
+
 ### Advisor
 
 - [ ] 日本語表現だけの advice が Executor に届かない評価ケースを通す。
@@ -2143,11 +2294,19 @@ technical correction 上限、language filtering、candidate mapping、cancel、
 - [ ] Executor に日本語 correction prompt を送らない。
 - [ ] backend の conversation / instructions / tools / workspace 隔離が適合試験済み。
 - [ ] model ID、egress、allowlist を確認して Extension 内部から呼ぶ。
+- [ ] 初回の Google Gemini API Flash 系1モデルを適合試験で固定し、外部送信が不許可ならローカル検証だけを行う。
+- [ ] 原文が UTF-8 で8192 bytesを超えたら、自動処理を skip して原文を維持する。
 - [ ] 正常 stop / 非空 / toolCall なし / サイズ上限を確認し、length を reject する。
 - [ ] code / URL / path / version / number / 対応 identifier / 引用 / citation を保護する。
 - [ ] 対応する Markdown 構造と protected span の byte-equal 保持を検証する。
+- [ ] CommonMark と GFM の表 / task list を対応範囲とし、未対応構造を含む候補は全体を skip する。
+- [ ] 自動 gate は Unihan / CJClassifier だけを使い、optional lint を暗黙に有効化しない。
 - [ ] 意味反転の fixture を拒否し、一般的な意味同値性を保証したと主張しない。
+- [ ] 主体や対象の関係が変わり得る助詞修正と、許可助詞パターンにない助詞変更を含む修正案を拒否する。
+- [ ] 第46.3章の200例を各3回評価し、改善対象の各分類80%以上、正常文の不要変更0件を満たす。
+- [ ] 評価例で重大な意味変更を採用していない。
 - [ ] pre/post が同じ editable-prose scope と policy を用いる。
+- [ ] pre/post のどちらかで Unihan 診断が50件に達した場合は比較不能として原文を維持する。
 - [ ] PASS より新規禁止診断・quality regression を先に評価する。
 - [ ] always では同点 PASS の局所修正を採用できる。
 - [ ] candidate あたり最大1 request、障害・拒否でも追加 Executor 0。
@@ -2160,6 +2319,7 @@ technical correction 上限、language filtering、candidate mapping、cancel、
 - [ ] session switch / new / fork / config OFF / Escape で旧結果を適用しない。
 - [ ] user cancel 後に Formatter / gate / technical steer を開始しない。
 - [ ] 全体 deadline と個別 timeout が両方有効で、ローカルの処理停止を確認できる。
+- [ ] 日本語処理を10秒で打ち切り、p95 5秒の仮目標に対する実測結果を記録する。
 - [ ] TUI / RPC final / turn_end / 保存 / 次 context の5面で最終本文が一致する。
 - [ ] streaming が暫定表示であることを文書化し、完全非公開を保証しない。
 - [ ] 複数 text block は MVP の自動修正から安全に除外する。
@@ -2216,6 +2376,9 @@ Formatter: 「『方案』を『方針』に直してください」
 これが起きたら失敗。レビュー文・前置きの出力は Formatter の成功としない。
 
 ### 53.3 一緒に最初から通す回帰ケース
+
+初回は以下の Formatter と中断に関するケースを対象とする。
+Advisor の review 回数、新 snapshot、Advisor 待機中の中断、concern の収束に関するケースは Phase 2 で最初から通す。
 
 | ケース | 期待 |
 |---|---|
@@ -2341,7 +2504,9 @@ Finalization:
 - **[S1] 原設計書:** この会話に添付された `pi-quality-flow-design.md`、作成日 2026-09-12。第1〜57章と Appendix A/B の構成、名称、責務分離を継承した。
 - **[S2] 合意済みレビュー:** 同じ会話の直前のレビュー回答。backend 隔離、candidate 管理、adoption 判定、意味保持、完了判定、表示・保存、収束、cancel、移行等の提案を反映した。
 
-本改訂は S1 / S2 に基づく設計編集であり、以下の外部資料の最新版調査や、Pi / CLI / Bridge の実行試験を追加実施したものではない。新しい設定キー・型・adapter・数値は本設計の提案であり、upstream 実装済み機能を表していない。
+初期の v0.2 改訂は S1 / S2 に基づく設計編集であり、以下の外部資料の最新版調査や、Pi / CLI / Bridge の実行試験は行っていない。
+その後の設計インタビューで確認した固定版のソースと同梱資料は Appendix D.4 に記録する。
+新しい設定キー、型、adapter、数値は本設計の提案であり、upstream 実装済み機能を表していない。
 
 ### 実装時に照合する一次資料
 
@@ -2367,12 +2532,12 @@ Finalization:
 ```text
 1. Pi の direct replacement / event identity / cancel の契約試験
 2. 通常 API backend と CLI schema の適合試験
-3. candidate / snapshot / config / budget / cancellation の安全機構
+3. candidate / config / cancellation と Formatter の deadline
 4. protected span / source map / semantic-risk guard
 5. adoption 決定表と unit / mock integration tests
-6. Japanese Direct Formatter を旧 Advisor なしで完成
-7. General Advisor の統合、final barrier、上限付き delivery
-8. 実モデル・TUI・headless・RPC・保存の E2E
+6. Japanese Direct Formatter を旧 Advisor なしで実装
+7. Formatter の実モデル評価と TUI / headless / RPC / 保存の E2E、初回リリース
+8. Phase 2 の設計確定後、General Advisor の snapshot / budget / steering 契約と統合、統合 E2E
 9. 運用観測性と更新時の再検証
 10. 適合した場合のみ Antigravity adapter / optional file formatter
 ```
@@ -2391,10 +2556,11 @@ Antigravity の適合試験を早期に並行して設計してもよいが、�
 | 修正対象 | 単一 text block 内の編集可能 prose |
 | 修正範囲 | tech-minimal。局所修正のみ |
 | Pi hook | message_end、対象 Pi の契約試験を必須化 |
-| 候補識別 | candidateId + session/run/snapshot |
+| 回答候補の識別 | candidateId + session/run/snapshot |
+| 本文の呼び分け | Formatter の返却本文は修正案、最終的に選んだ本文は採用本文 |
 | 本文 hash | inputHash / outputHash、識別の代用にしない |
-| モデル呼び出し | 適合済み FormatterBackend。通常 API を先行 |
-| streamSimple | 通常 API adapter の実装候補。隔離の証明にはしない |
+| モデル呼び出し | 適合済み FormatterBackend。初回は Google Gemini API の Flash 系1モデル |
+| Pi の初回適合対象 | 0.85.1。通常 API adapter は `ModelRegistry.complete()` を使う |
 | Antigravity | isolated adapter が適合した組合せのみ |
 | AskAntigravity / review_japanese | Main tool 経由で使わない |
 | Formatter context | 今回の protected 本文 + 承認 prompt のみ |
@@ -2413,6 +2579,17 @@ Antigravity の適合試験を早期に並行して設計してもよいが、�
 | 外部送信 | project trust と独立した global 許可、role 別 allowlist |
 | legacy integration | Phase 1 から旧 Advisor / JP correction を外す |
 | Main Executor retry | 日本語理由では行わない |
+| 最初のリリース | Phase 1 の Formatter 単体。Advisor 固有の機構は Phase 2 |
+| 初回の原文上限 | UTF-8で8 KiB。超過時は候補全体を skip |
+| 初回の構造対応 | CommonMark と GFM の表 / task list。未対応構造を含む候補は全体を skip |
+| 初回の gate | Unihan / CJClassifier。optional lint は後続版で適合確認 |
+| 初回の改善対象 | 誤字、文字混入、意味関係を変えない明確な助詞誤り |
+| 初回の意味保持基準 | 評価例で重大な意味変更を1件でも採用した構成は公開しない |
+| 助詞修正 | 許可助詞パターンに限定。未登録の助詞変更を含む修正案全体を拒否 |
+| CLI 診断上限 | pre/post のどちらかで Unihan 診断50件に達したら原文維持 |
+| 日本語処理の遅延 | p95 5秒、打切り10秒を仮目標とし実測で見直す |
+| 初回の改善評価 | 200例を各3回。改善対象の各分類80%以上、正常文の不要変更0件 |
+| 今回の設計確定範囲 | Phase 0A〜1。Advisor の詳細は Phase 2 着手前の別ラウンドで確定 |
 
 ---
 
@@ -2447,20 +2624,21 @@ Antigravity の適合試験を早期に並行して設計してもよいが、�
 
 ### D.1 未検証事項
 
-本改訂時点の状態はすべて **未実施／実装時に確認**。文章の編集・整合確認と、実行環境での適合試験を分ける。
+以下の適合試験はすべて **未実施／実装時に確認**。
+文章の整合確認と Appendix D.4 の静的調査を、実行環境での適合試験とは分ける。
 
 | ID | 確認する対象 | 決める内容 | ゲート |
 |---|---|---|---|
 | C01 | Pi / SDK version | API signature、イベント順序、message replacement の5面伝播 | Phase 0A 必須 |
 | C02 | Pi event identity | stable ID または run/turn/sequence mapping、replacement 後の同一性 | Phase 0A 必須 |
-| C03 | Pi cancel / trust / delivery | 実 signal / lifecycle、信頼状態、steer の起動・ACK | Phase 0A 必須 |
+| C03 | Pi cancel / trust / delivery | 実 signal / lifecycle、信頼状態、steer の起動・ACK | cancel / trust は Phase 0A、steer は Phase 2 |
 | C04 | Pi queued continuation | 確実に観測できる範囲、外部 Extension の限界 | capability に記録 |
 | C05 | 通常 API backend | stateless、tool-less、workspace 非接続、正常終了・cancel | Phase 0A 必須 |
 | C06 | Antigravity | Bridge / agy / engine / adapter / isolation config の適合 | 未合格なら無効 |
 | C07 | jp-quality-gate | binary / commit、JSON fixture、exit / flag / rule ID / 座標 | Phase 0A 必須 |
 | C08 | gate projection | 編集可能 scope、source map、境界診断、pre/post 比較 | Phase 0B 必須 |
 | C09 | semantic-risk guard | 対応表現、変更量上限、文境界、評価 fixture | Phase 0B 必須 |
-| C10 | workspace snapshot | dirty / untracked / external edits の検出範囲と限界 | Phase 0B 必須 |
+| C10 | workspace snapshot | dirty / untracked / external edits の検出範囲と限界 | Phase 2 必須 |
 | C11 | ライセンス | Advisor 再利用 code の対象 commit と notice | 再利用前必須 |
 | C12 | headless / RPC client | final message への収束、非 text / citation / 保存 | リリース前必須 |
 | C13 | 実モデルの意味保持 | 非機密コーパス、保護・reject・誤修正の評価 | profile 有効化前必須 |
@@ -2489,6 +2667,26 @@ Profile / rule policy / config digest:
 
 通常 API backend は C01〜C05、C07〜C10、C12〜C13 の必要条件を満たす組合せだけを有効化する。コード再利用がある場合は C11 も必須。
 
+初回リリースでは C03 の steering と C10 を除外し、Phase 2 の Advisor 有効化前に必須とする。
+Formatter の有効化には第46.3章の改善基準と意味保持の公開基準も適用する。
+
 C06 が未合格でも通常 backend の完成を妨げない。ただし Antigravity を利用可能・安全・tool-less と表示しない。
 
 未検証項目を TODO として残すだけで automatic Formatter を有効化しない。必須 capability が満たされないときは、原文を維持する検証専用／無効モードで停止する。
+
+### D.4 設計インタビュー時の静的調査
+
+2026-09-13 に導入済みの Pi と関連リポジトリを読み取り専用で確認した。
+以下はソースと同梱資料の調査結果であり、互換性試験や実モデル試験の合格記録ではない。
+
+| 対象 | 確認結果 | 設計への影響 |
+|---|---|---|
+| Pi `@earendil-works/pi-coding-agent` 0.85.1 | `message_end` は同じ role の `{ message }` を返す置換契約を持つ | 5面伝播は実測試験を残す |
+| 同版の ModelRegistry | `complete(model, context, options)` を提供し、`streamSimple` は存在しない | 第6.2章の adapter API は対象版ごとに合わせる |
+| `jp-quality-gate` commit `dac09548710b82333581fc2a3457c6346b628074` | stdin / JSON / exit 0, 1, 2 の基本契約と一致。座標は Unicode code point | UTF-16 への座標変換が必要 |
+| 同 CLI の診断 | wire に `segmentId` と `issueKey` はなく、Unihan 診断は最大50件。打切り表示もない | 診断 identity と比較結果の完全性を adapter の適合条件に含める |
+| 第53章の「この実装方案では…」 | 既定 core の文字テーブルとかな判定からは検出対象にならないと判断 | mock による順序試験と実際の改善評価を分ける |
+| 既存 Pi integration | `turn_end` の quality failure から hidden steer で全文再出力を要求 | 既存 integration の無効化が必要。legacy / opt-in 化は実装済みと扱わない |
+
+Pi の根拠は固定タグ `v0.85.1` の [ModelRegistry](https://github.com/earendil-works/pi/blob/v0.85.1/packages/coding-agent/src/core/model-registry.ts#L97)、[Extension の型](https://github.com/earendil-works/pi/blob/v0.85.1/packages/coding-agent/src/core/extensions/types.ts#L1073)、[message の処理](https://github.com/earendil-works/pi/blob/v0.85.1/packages/coding-agent/src/core/agent-session.ts#L626) と、導入物の同梱 `docs/extensions.md`。
+CLI の根拠は上記 commit の [Unihan 診断上限](https://github.com/ktutumi/jp-quality-gate/blob/dac09548710b82333581fc2a3457c6346b628074/internal/unihan/unihan.go#L16)、[JSON 集計](https://github.com/ktutumi/jp-quality-gate/blob/dac09548710b82333581fc2a3457c6346b628074/internal/report/report.go#L108)、[CLI 座標の既存テスト](https://github.com/ktutumi/jp-quality-gate/blob/dac09548710b82333581fc2a3457c6346b628074/cmd/jp-quality-gate/main_test.go#L55)、[かな判定](https://github.com/ktutumi/jp-quality-gate/blob/dac09548710b82333581fc2a3457c6346b628074/internal/cj/classifier.go#L659)、[legacy steering](https://github.com/ktutumi/jp-quality-gate/blob/dac09548710b82333581fc2a3457c6346b628074/integrations/pi/index.js#L235)。
