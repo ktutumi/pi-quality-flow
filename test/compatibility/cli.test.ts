@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assistantText } from "../helpers/harness.ts";
+import { GATE_BIN } from "../helpers/gate-bin.ts";
 
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const MOCK_EXT = join(ROOT, "test", "helpers", "mock-provider-extension.ts");
@@ -101,6 +102,8 @@ async function writeFixtures(dir: string): Promise<void> {
 const COMMON_ENV = (dir: string): Record<string, string> => ({
   PI_QF_MOCK_SCRIPT: join(dir, "mock-script.json"),
   PI_QF_REWRITE_FILE: join(dir, "rewrite.json"),
+  // 採用シームは pre gate が使える構成だけを対象にする（固定版 binary）。
+  PI_QF_GATE_BIN: GATE_BIN,
 });
 
 const COMMON_ARGS = [

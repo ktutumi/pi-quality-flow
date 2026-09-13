@@ -30,6 +30,7 @@ import {
 import { createQualityFlowExtension } from "../../src/extension.ts";
 import { isEligibleTerminalCandidate, sha256Utf8, MAX_SOURCE_BYTES } from "../../src/pi/adapter.ts";
 import { createHarness, createMockModel } from "../helpers/harness.ts";
+import { GATE_BIN } from "../helpers/gate-bin.ts";
 import {
   createMockProviderExtension,
   MOCK_PROVIDER,
@@ -275,6 +276,9 @@ test("session 切替: runtime newSession / fork で session_start reason が届�
               hidden: true,
               factory: createQualityFlowExtension({
                 finalize: ({ originalText }) => (originalText === ORIGINAL ? ADOPTED : undefined),
+                // 採用シームは pre gate が使える構成だけを対象にする。
+                gateExecutable: GATE_BIN,
+                configAgentDir: agentDir,
               }),
             },
           ],

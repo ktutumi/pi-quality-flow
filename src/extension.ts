@@ -1,33 +1,42 @@
 /**
- * pi-quality-flow Extension (Phase 0A)。
+ * pi-quality-flow Extension（Phase 0A + 設定/command、Issue #4）。
  *
  * 現在の範囲:
  * - terminal candidate の識別（正常 stop / 非空 text block 1つ / toolCall なし / 8 KiB 以内）
  * - candidateId と inputHash / outputHash の分離、single-flight claim
  * - `message_end` 返却 `{ message }` による本文 A → B の直接置換
  * - queued continuation が観測できる場合は置換を開始しない
+ * - 設定 schema v2 の解決（defaults → global → trusted project）と configRevision
+ * - /quality command 群（status / doctor / on / off / japanese / debug）
+ * - mode 表に従う自動 validation-only gate（Formatter backend は Issue #5 以降）
  *
- * Phase 0A では日本語 Pipeline は未実装。既定の default export は fail-closed
- * （finalize を持たないため置換しない、candidate の観測のみ）。置換シームは
- * `createQualityFlowExtension({ finalize })` に限り、契約試験の harness だけが
- * mock finalizer を注入する（test/helpers/）。
+ * 実モデルによる自動修正は Phase 1 の適合試験が完了するまで有効化しない
+ * （egress deny・空 allowlist・未適合 backend ではローカル検証のみ）。
  *
- * 設計: docs/pi-quality-flow-design-v0.2.md 第6・11・43.0章。
+ * 設計: docs/pi-quality-flow-design-v0.2.md 第6・11・13・27・29章。
  */
+import { isAbsolute } from "node:path";
 import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { CandidateLedger, type CandidateRecord } from "./coordinator/candidates.ts";
+import { loadQualityFlowConfig, type ResolvedConfig } from "./config/loader.ts";
+import { QualityFlowConfigStore, type ConfigSnapshot } from "./config/store.ts";
+import { shouldTriggerFormatter } from "./config/trigger.ts";
+import { PINNED_GATE_SHA256, verifyExecutableDigest } from "./jpqg/runner.ts";
 import {
   isEligibleTerminalCandidate,
   replaceSingleTextBlock,
   sha256Utf8,
 } from "./pi/adapter.ts";
-import { checkJapanese, type GateCheck } from "./japanese/service.ts";
+import { checkJapanese, type CheckJapaneseResult, type GateCheck } from "./japanese/service.ts";
 
-/** Phase 0A の置換シーム。採用本文を返す。undefined は原文維持。 */
+/** Phase 0A〜0B の採用シーム。採用本文を返す。undefined は原文維持。 */
 export type Finalizer = (input: {
   candidateId: string;
   originalText: string;
+  /** claim 後・採用判断前に実行された pre gate の結果。 */
+  preGate?: CheckJapaneseResult;
 }) => string | undefined | Promise<string | undefined>;
 
 export interface QualityFlowOptions {
@@ -35,10 +44,19 @@ export interface QualityFlowOptions {
   finalize?: Finalizer;
   /**
    * 固定版 jp-quality-gate の検証済み executable。
-   * 省略時は日本語検証（自動 validation-only gate / 手動 check）を行わない。
-   * 設定面の解決は Issue #4。
+   * 省略時は設定の japanese.gate.command（絶対パスのみ）を使う。
    */
   gateExecutable?: string;
+  /**
+   * global 設定ディレクトリ。省略時は getAgentDir()。
+   * テストがユーザーの実設定を読まないための注入点。
+   */
+  configAgentDir?: string;
+  /**
+   * 設定 store の観測 hook（契約試験専用。設定変更の競合試験で使う）。
+   * 本番 entry point は渡さない。
+   */
+  configStoreHook?: (store: QualityFlowConfigStore) => void;
 }
 
 export type ExtensionOutcome =
@@ -57,14 +75,22 @@ export interface FinalizeResult {
   replacement?: { textIndex: number; text: string };
 }
 
-/** message_end 処理の中核。Phase 0B 以降の非同期 stage 化は Issue #7。 */
+/** message_end 処理の中核。非同期 stage 化と deadline は Issue #7。 */
 export async function finalizeAssistantMessage(input: {
   message: AssistantMessage;
   pendingMessages: boolean;
   ledger: CandidateLedger;
   finalize?: Finalizer;
+  /** claim 時点の configRevision。置換前に再検査する（in-flight 無効化）。 */
+  configRevision?: number;
+  isConfigCurrent?: (revision: number) => boolean;
+  /**
+   * pre gate（原文の検証）。single-flight claim の後・採用判断の前に
+   * 1回だけ実行する（重複 event による複数回 CLI 呼び出しを防ぐ）。
+   */
+  preGate?: (text: string) => Promise<CheckJapaneseResult>;
 }): Promise<FinalizeResult> {
-  const { message, pendingMessages, ledger, finalize } = input;
+  const { message, pendingMessages, ledger, finalize, preGate } = input;
   const eligibility = isEligibleTerminalCandidate(message);
   if (!eligibility.ok) {
     return { outcome: "skipped", reason: eligibility.code };
@@ -89,6 +115,12 @@ export async function finalizeAssistantMessage(input: {
   }
   const record: CandidateRecord = claim.record;
 
+  // pre gate は candidate 単位で最大1回（claim 後）。原文を対象とする。
+  let preGateResult: CheckJapaneseResult | undefined;
+  if (preGate) {
+    preGateResult = await preGate(eligibility.text);
+  }
+
   if (!finalize) {
     // fail-closed: 観測のみ。candidate は識別・記録するが置換はしない。
     ledger.commit(record, "unchanged", "finalizer-not-configured", inputHash);
@@ -102,6 +134,7 @@ export async function finalizeAssistantMessage(input: {
   const adopted = await finalize({
     candidateId: record.candidateId,
     originalText: eligibility.text,
+    preGate: preGateResult,
   });
   if (adopted === undefined) {
     ledger.commit(record, "unchanged", "no-adoption", inputHash);
@@ -115,6 +148,11 @@ export async function finalizeAssistantMessage(input: {
     // claim と commit の間に session が切り替わっていた場合は置換しない。
     ledger.commit(record, "skipped", "stale-session");
     return { outcome: "stale", reason: "stale-session", candidateId: record.candidateId };
+  }
+  if (input.configRevision !== undefined && input.isConfigCurrent && !input.isConfigCurrent(input.configRevision)) {
+    // 処理中に設定が変わった（OFF / mode 変更 / reload）場合は旧結果を適用しない。
+    ledger.commit(record, "skipped", "stale-config");
+    return { outcome: "stale", reason: "stale-config", candidateId: record.candidateId };
   }
 
   const outputHash = sha256Utf8(adopted);
@@ -143,9 +181,45 @@ function appendCandidateEntry(pi: ExtensionAPI, record: CandidateRecord): void {
 }
 
 export function createQualityFlowExtension(options: QualityFlowOptions = {}): ExtensionFactory {
-  const { finalize, gateExecutable } = options;
-  /** 日本語処理全体の初期上限（設計書 第32.1章）。設定面は Issue #4。 */
-  const japaneseDeadlineMs = 10_000;
+  const { finalize, gateExecutable, configStoreHook } = options;
+  const store = new QualityFlowConfigStore();
+  /** session_start 時の解決結果（status / doctor の表示用）。 */
+  let resolved: ResolvedConfig | undefined;
+  /** 現在の final response（正常 stop の本文）。手動 check の対象。 */
+  let lastFinalText: string | undefined;
+  /** 最後の gate check（status 表示用）。 */
+  let lastCheck: GateCheck | undefined;
+
+  /** 設定に基づく実行可能な gate executable。 */
+  const resolveGateExecutable = (): string | undefined => {
+    if (gateExecutable) return gateExecutable;
+    const command = store.current.config.japanese.gate.command;
+    // 相対名は PATH 探索先が検証対象とずれるため実行しない（runner と同じ原則）。
+    return isAbsolute(command) ? command : undefined;
+  };
+
+  /** 自動処理の可否と理由（mode 表、設計書 第13章）。 */
+  const autoGateDecision = (snapshot: ConfigSnapshot): { run: boolean; reason: string } => {
+    const cfg = snapshot.config;
+    if (!cfg.enabled) return { run: false, reason: "extension-disabled" };
+    if (!cfg.japanese.enabled) return { run: false, reason: "japanese-disabled" };
+    if (!cfg.japanese.gate.enabled) {
+      // mode 非off との組合せは loader / command で拒否済み。ここに届かない。
+      return { run: false, reason: "gate-disabled" };
+    }
+    return { run: true, reason: "pre-gate" };
+  };
+
+  /** 本文置換（修正適用）の可否。mode off は validation-only で置換しない。 */
+  const correctionAllowed = (snapshot: ConfigSnapshot): boolean => {
+    const cfg = snapshot.config;
+    return (
+      cfg.enabled &&
+      cfg.japanese.enabled &&
+      cfg.japanese.gate.enabled &&
+      cfg.japanese.mode !== "off"
+    );
+  };
 
   /** check 結果を session entry に記録する（LLM context には participation しない）。 */
   const recordCheck = (
@@ -155,6 +229,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
     check:
       | { ok: true; check: GateCheck }
       | { ok: false; code: string },
+    extra?: Record<string, unknown>,
   ): void => {
     if (!check.ok) {
       pi.appendEntry("pi-quality-flow:check", {
@@ -162,6 +237,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         scope: "editable-prose",
         status: "skipped",
         failureCode: check.code,
+        ...extra,
       });
       return;
     }
@@ -182,6 +258,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       })),
       inputBytes: text === undefined ? undefined : Buffer.byteLength(text, "utf8"),
       binaryVersion: c.binaryVersion,
+      ...extra,
     });
   };
 
@@ -204,17 +281,102 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
     return parts.join(" ");
   };
 
+  const configLines = (snapshot: ConfigSnapshot): string[] => {
+    const cfg = snapshot.config;
+    const jp = cfg.japanese;
+    const lines = [
+      `extension: ${cfg.enabled ? "on" : "off"} (configRevision=${snapshot.revision}, ${snapshot.lastChangeReason})`,
+      `japanese: ${jp.enabled ? "on" : "off"}, mode=${jp.mode}, profile=${jp.profile}, deadline=${jp.deadlineMs}ms`,
+      `gate: ${jp.gate.enabled ? "on" : "off"}, trigger=${jp.gate.trigger}, command=${jp.gate.command}`,
+      `formatter: backend=${jp.formatter.backend} (compat: unverified)`,
+      `model (formatter): ${describeModelResolution(cfg)}`,
+      `security: cloudEgress=${cfg.security.cloudEgress}, allowlist=[advisor:${cfg.security.allowedModels.advisor.length}, formatter:${cfg.security.allowedModels.formatter.length}]`,
+      `gate CLI: ${resolveGateExecutable() ? "executable configured" : "not configured"}`,
+    ];
+    if (lastCheck !== undefined) {
+      lines.push(`last check: ${lastCheck.status} score=${lastCheck.score.errors}e/${lastCheck.score.warnings}w scope=${lastCheck.scope}`);
+    }
+    return lines;
+  };
+
+  /** model resolution / permission / backend compat / CLI compat を1行に分けず表示する。 */
+  const describeModelResolution = (cfg: ConfigSnapshot["config"]): string => {
+    const allowlist = cfg.security.allowedModels.formatter;
+    const model = cfg.japanese.model;
+    if (cfg.security.cloudEgress === "deny") {
+      return model
+        ? `configured (${model.provider}/${model.modelId ?? "?"}) but egress=deny`
+        : "not configured; egress=deny";
+    }
+    if (allowlist.length === 0) return "not configured; allowlist empty (no models allowed)";
+    if (model === undefined) return `not configured; allowlist has ${allowlist.length} model(s)`;
+    const allowed = allowlist.some(
+      (entry) => model.provider !== undefined && entry === `${model.provider}/${model.modelId ?? ""}`,
+    );
+    if (!allowed) return `configured (${model.provider}/${model.modelId ?? "?"}) not in allowlist`;
+    // 解決は ModelRegistry での適合確認（Issue #5）まで行わない。ready とは表示しない。
+    return `configured (${model.provider}/${model.modelId ?? "?"}) — compatibility unverified`;
+  };
+
+  /** 設定問題の通知（障害通知と同じ扱い。ui.notifyOnFailure に従う）。 */
+  const notifyProblems = (
+    pi: ExtensionAPI,
+    ctx: { ui: { notify: (message: string, level: "info" | "warning" | "error") => void } },
+    result: ResolvedConfig,
+  ): void => {
+    const cfg = result.config;
+    if (!cfg.ui.notifyOnFailure) return;
+    for (const problem of result.problems) {
+      // 通知の 1 行サマリ（本文断片を含まない）。
+      const detailLines: string[] = [];
+      if (problem.code === "schema-invalid") {
+        detailLines.push(...problem.issues.map((i) => `${i.path}: ${i.code}`));
+      } else if (problem.code === "legacy-config") {
+        detailLines.push(...problem.legacy.map((l) => `${l.path}${l.migration ? ` → ${l.migration}` : ""}`));
+      } else {
+        detailLines.push(problem.code);
+      }
+      const detail = detailLines.join("; ");
+      pi.appendEntry("pi-quality-flow:config-problem", {
+        scope: problem.scope,
+        path: problem.path,
+        code: problem.code,
+        issues: problem.issues.map((i) => ({ path: i.path, code: i.code })),
+        legacy: problem.legacy.map((l) => ({ path: l.path, migration: l.migration })),
+      });
+      ctx.ui.notify(
+        `quality-flow: ${problem.scope} config (${problem.path}) not applied: ${problem.code} ${detail}`,
+        "warning",
+      );
+      // headless / RPC でも観測できるように entry にも残す。
+      pi.appendEntry("pi-quality-flow:notify", {
+        message: `quality-flow: ${problem.scope} config not applied: ${problem.code} ${detail}`,
+        level: "warning",
+      });
+    }
+  };
+
   return (pi: ExtensionAPI) => {
     const ledger = new CandidateLedger();
-    /** 現在の final response（正常 stop の本文）。手動 check の対象。 */
-    let lastFinalText: string | undefined;
+    configStoreHook?.(store);
 
     pi.on("session_start", (event, ctx) => {
       ledger.beginSession(ctx.sessionManager.getSessionId());
       // session switch / new / fork で旧 final response を破棄する（Issue #7 の先取り）。
       lastFinalText = undefined;
+
+      // 設定の再解決: packaged defaults → global → trusted project。
+      // trust 不明・未信頼では project layer を読まない。
+      const result = loadQualityFlowConfig({
+        agentDir: options.configAgentDir ?? getAgentDir(),
+        cwd: ctx.cwd,
+        projectTrusted: ctx.isProjectTrusted(),
+      });
+      resolved = result;
+      store.reload(result.config, `session_start:${event.reason}`);
+      notifyProblems(pi, ctx, result);
       // session_start の全 reason（startup / new / resume / fork / reload）を
-      // 契約観測のため entry に残す。Phase 0A の観測対象。
+      // 契約観測のため entry に残す。
       pi.appendEntry("pi-quality-flow:session", { reason: event.reason });
     });
 
@@ -229,12 +391,90 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
     pi.on("message_end", async (event, ctx) => {
       if (event.message.role !== "assistant") return undefined;
       const message: AssistantMessage = event.message;
+      const snapshot = store.current;
+      const decision = autoGateDecision(snapshot);
+      const executable = resolveGateExecutable();
+
+      // pre gate の結果と trigger 判断（entry 記録用）。
+      let preCheck: CheckJapaneseResult | undefined;
+      let preGateText: string | undefined;
+      let formatterDecision: string | undefined;
+      /** trigger 評価の結果（mode off / 未評価は undefined）。 */
+      let triggeredResult: boolean | undefined;
+      /** pre gate 完了後の configRevision 再検査結果。 */
+      let preGateCurrent = true;
+
+      /** pre gate（原文の検証）。claim 後に 1 回だけ実行される。
+       *  各 await 後の有効性検査（Issue #4）: 完了後に設定が変わっていたら
+       *  以後の stage（Formatter）を開始しない。 */
+      let preGateRunner: ((text: string) => Promise<CheckJapaneseResult>) | undefined;
+      if (decision.run && executable) {
+        preGateRunner = async (text) => {
+          const check = await checkJapanese({
+            text,
+            executable,
+            timeoutMs: snapshot.config.japanese.deadlineMs,
+            signal: ctx.signal,
+          });
+          preCheck = check;
+          preGateText = text;
+          lastCheck = check.ok ? check.check : undefined;
+          if (!store.isCurrent(snapshot.revision)) preGateCurrent = false;
+          return check;
+        };
+      }
 
       const result = await finalizeAssistantMessage({
         message,
         pendingMessages: ctx.hasPendingMessages(),
         ledger,
-        finalize,
+        // 採用シーム: mode 表（第13章）に従い、pre gate の後で trigger を評価して
+        // から Formatter（mock seam）を起動する。OFF / mode off / trigger 不成立 /
+        // pre gate 不使用では Formatter を開始しない（原文維持）。
+        finalize: (input) => {
+          if (!preGateCurrent) {
+            // pre gate 実行中に設定が変わった（OFF / mode 変更 / reload）。
+            // 以後の stage（Formatter）を開始しない（設計書 第33.2章）。
+            formatterDecision = "stale-config";
+            return undefined;
+          }
+          if (!correctionAllowed(snapshot)) {
+            formatterDecision = snapshot.config.japanese.mode === "off" ? "mode-off" : "extension-or-japanese-disabled";
+            return undefined;
+          }
+          const pre = input.preGate;
+          if (!pre || !pre.ok) {
+            // pre gate が実行されない / 障害の場合は Formatter を開始しない
+            // （pre 障害なら Formatter 0回。設計書 第43.3章）。
+            formatterDecision = pre ? `pre-failed:${pre.code}` : "pre-unavailable";
+            triggeredResult = false;
+            return undefined;
+          }
+          if (pre.check.status === "skipped") {
+            // 対象外（英語のみ / 未対応構造 / 対応不能）は全文原文維持。
+            formatterDecision = `pre-skipped:${pre.check.reason ?? "unknown"}`;
+            triggeredResult = false;
+            return undefined;
+          }
+          const jp = snapshot.config.japanese;
+          triggeredResult =
+            jp.mode === "always" ||
+            shouldTriggerFormatter(pre.check.score, jp.gate.trigger);
+          if (!triggeredResult) {
+            formatterDecision = "gate-not-triggered";
+            return undefined;
+          }
+          if (!finalize) {
+            // backend 未適合 / egress 不許可相当。ローカル検証のみで留める。
+            formatterDecision = "formatter-unavailable";
+            return undefined;
+          }
+          return finalize(input);
+        },
+        // pre gate は candidate 単位で claim 後に 1 回だけ実行される。
+        preGate: preGateRunner,
+        configRevision: snapshot.revision,
+        isConfigCurrent: (revision) => store.isCurrent(revision),
       });
 
       if (result.candidateId) {
@@ -242,29 +482,29 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         if (record) appendCandidateEntry(pi, record);
       }
 
-      // 自動 validation-only gate（Issue #3）。
-      // 置換があれば採用本文、なければ原文を検査する。本文は置換しない。
-      if (gateExecutable) {
-        const eligibility = isEligibleTerminalCandidate(message);
-        const finalText = result.replacement?.text ?? (eligibility.ok ? eligibility.text : undefined);
-        if (finalText !== undefined) {
-          const check = await checkJapanese({
-            text: finalText,
-            executable: gateExecutable,
-            signal: ctx.signal,
-            timeoutMs: japaneseDeadlineMs,
-          });
-          recordCheck(pi, "auto", finalText, check);
+      // 自動 gate の検証結果（pre gate の原文対象）。
+      if (preCheck !== undefined) {
+        const jp = snapshot.config.japanese;
+        const extra: Record<string, unknown> = { mode: jp.mode };
+        if (jp.mode !== "off") {
+          extra.triggered = triggeredResult ?? false;
+          extra.formatterReason = formatterDecision ?? "formatter-started";
         }
+        recordCheck(pi, "auto", preGateText, preCheck, extra);
       }
 
       // 正常 stop の本文だけを手動 check の対象として追跡する。
+      // 置換が成功した場合は採用本文を「現在の final response」とする。
       if (message.stopReason === "stop") {
-        const texts = (message.content ?? [])
-          .filter((b): b is { type: "text"; text: string } => b.type === "text")
-          .map((b) => b.text);
-        const joined = texts.join("");
-        if (joined.length > 0) lastFinalText = joined;
+        if (result.outcome === "formatted" && result.replacement) {
+          lastFinalText = result.replacement.text;
+        } else {
+          let joined = "";
+          for (const block of message.content ?? []) {
+            if (block.type === "text" && block.text.length > 0) joined += block.text;
+          }
+          if (joined.length > 0) lastFinalText = joined;
+        }
       }
 
       if (result.outcome !== "formatted" || !result.replacement) return undefined;
@@ -288,39 +528,251 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       }
     });
 
-    // /quality japanese check: 現在の final response を read-only で検証する。
-    // Advisor / Formatter / Executor を起動せず、過去の保存 message を変更しない。
+    // /quality command 群（設計書 第29章）。Advisor 起動 command と
+    // Main tool は登録しない。command が送信許可を暗黙に変えることはない。
     pi.registerCommand("quality", {
-      description: "pi-quality-flow status / japanese check",
+      description: "pi-quality-flow status / doctor / japanese / debug",
       handler: async (args, ctx) => {
-        if (args.trim() !== "japanese check") {
-          ctx.ui.notify("usage: /quality japanese check", "info");
+        const parts = args.trim().split(/\s+/).filter((s) => s.length > 0);
+        const notify = (message: string, level: "info" | "warning" | "error" = "info") => {
+          ctx.ui.notify(message, level);
+          pi.appendEntry("pi-quality-flow:notify", { message, level, command: parts.join(" ") });
+        };
+        const snapshot = store.current;
+
+        if (parts.length === 0 || parts[0] === "help") {
+          notify(
+            [
+              "usage: /quality status | doctor | on | off |",
+              "  japanese on|off | japanese mode always|gate|off | japanese check |",
+              "  debug on|off",
+            ].join(" "),
+          );
           return;
         }
-        if (!gateExecutable) {
-          ctx.ui.notify("japanese gate is not configured", "warning");
-          return;
-        }
-        // 現在の final response（正常 stop の本文）のみを対象にする。
-        // 非アクティブ branch の履歴は参照しない。
-        const lastText = lastFinalText;
-        if (lastText === undefined) {
-          ctx.ui.notify("no final response to check", "warning");
-          return;
-        }
-        const check = await checkJapanese({
-          text: lastText,
-          executable: gateExecutable,
-          signal: ctx.signal,
-          timeoutMs: japaneseDeadlineMs,
-        });
-        recordCheck(pi, "manual", lastText, check);
-        if (check.ok) {
-          ctx.ui.notify(summarizeCheck(check.check), "info");
-        } else {
-          ctx.ui.notify(`japanese check failed: ${check.code}`, "error");
+
+        switch (parts[0]) {
+          case "status": {
+            const lines = [
+              `pi-quality-flow (configRevision=${snapshot.revision})`,
+              ...configLines(snapshot),
+              describeSources(resolved),
+            ];
+            notify(lines.join("\n"));
+            return;
+          }
+          case "doctor": {
+            const executable = resolveGateExecutable();
+            const lines = [
+              `doctor (model calls: 0)`,
+              `config: ${describeConfigValidity(resolved)}`,
+              `gate CLI: ${await describeGateCli(executable)}`,
+              `model (formatter): ${describeModelResolution(snapshot.config)}`,
+              `backend: ${snapshot.config.japanese.formatter.backend} — compatibility unverified (not ready)`,
+              `conflicts: ${describeConflicts(ctx.cwd, options.configAgentDir ?? getAgentDir())}`,
+              `egress: ${snapshot.config.security.cloudEgress === "deny" ? "denied (local validation only)" : "allowed"}`,
+            ];
+            notify(lines.join("\n"));
+            return;
+          }
+          case "on": {
+            const change = store.setEnabled(true, "command:/quality on");
+            recordConfigChange(pi, change, "enabled=true");
+            notify("pi-quality-flow enabled");
+            return;
+          }
+          case "off": {
+            const change = store.setEnabled(false, "command:/quality off");
+            recordConfigChange(pi, change, "enabled=false");
+            notify("pi-quality-flow disabled");
+            return;
+          }
+          case "debug": {
+            const value = parts[1];
+            if (value !== "on" && value !== "off") {
+              notify("usage: /quality debug on|off", "warning");
+              return;
+            }
+            const change = store.setDebug(value === "on", `command:/quality debug ${value}`);
+            recordConfigChange(pi, change, `debug=${value}`);
+            notify(`debug ${value}`);
+            return;
+          }
+          case "advisor": {
+            // 初回リリースは Advisor 未実装。起動 command は登録しない。
+            notify("General Advisor is out of scope for the initial release (Phase 2)", "warning");
+            return;
+          }
+          case "japanese": {
+            const sub = parts[1];
+            if (sub === "on" || sub === "off") {
+              const change = store.setJapaneseEnabled(sub === "on", `command:/quality japanese ${sub}`);
+              if (!change.ok) {
+                notify(change.reason, "error");
+                return;
+              }
+              recordConfigChange(pi, change, `japanese.enabled=${sub}`);
+              notify(`japanese ${sub}`);
+              return;
+            }
+            if (sub === "mode") {
+              const mode = parts[2];
+              if (mode !== "always" && mode !== "gate" && mode !== "off") {
+                notify("usage: /quality japanese mode always|gate|off", "warning");
+                return;
+              }
+              const change = store.setJapaneseMode(mode, `command:/quality japanese mode ${mode}`);
+              if (!change.ok) {
+                notify(change.reason, "error");
+                return;
+              }
+              recordConfigChange(pi, change, `japanese.mode=${mode}`);
+              notify(`japanese mode ${mode}`);
+              return;
+            }
+            if (sub === "check") {
+              const executable = resolveGateExecutable();
+              if (executable === undefined) {
+                notify("japanese gate is not configured", "warning");
+                return;
+              }
+              // 現在の final response（正常 stop の本文）のみを対象にする。
+              // 非アクティブ branch の履歴は参照しない。
+              const lastText = lastFinalText;
+              if (lastText === undefined) {
+                notify("no final response to check", "warning");
+                return;
+              }
+              const check = await checkJapanese({
+                text: lastText,
+                executable,
+                timeoutMs: store.current.config.japanese.deadlineMs,
+                signal: ctx.signal,
+              });
+              lastCheck = check.ok ? check.check : undefined;
+              recordCheck(pi, "manual", lastText, check);
+              if (check.ok) {
+                notify(summarizeCheck(check.check));
+              } else {
+                notify(`japanese check failed: ${check.code}`, "error");
+              }
+              return;
+            }
+            notify("usage: /quality japanese on|off|mode|check", "warning");
+            return;
+          }
+          default:
+            notify(`unknown subcommand: ${parts[0]}`, "warning");
+            return;
         }
       },
     });
   };
+}
+
+/** handler 内で参照する実行時の executable（snapshot 不変）。 */
+
+function recordConfigChange(
+  pi: ExtensionAPI,
+  change: { ok: true; snapshot: ConfigSnapshot } | { ok: false; reason: string },
+  label: string,
+): void {
+  if (change.ok) {
+    pi.appendEntry("pi-quality-flow:config", {
+      revision: change.snapshot.revision,
+      reason: change.snapshot.lastChangeReason,
+      label,
+    });
+    return;
+  }
+  pi.appendEntry("pi-quality-flow:config-rejected", { label, reason: change.reason });
+}
+
+function describeSources(resolved: ResolvedConfig | undefined): string {
+  if (resolved === undefined) return "sources: not loaded";
+  const parts = ["defaults"];
+  if (resolved.sources.globalPath !== undefined) {
+    parts.push(`global(${resolved.sources.globalPath})`);
+  }
+  parts.push(
+    resolved.sources.projectTrusted
+      ? `project(${resolved.sources.projectPath ?? "n/a"})`
+      : "project: skipped (untrusted)",
+  );
+  return `sources: ${parts.join(" → ")}`;
+}
+
+function describeConfigValidity(resolved: ResolvedConfig | undefined): string {
+  if (resolved === undefined) return "not loaded";
+  if (resolved.problems.length === 0) return "valid";
+  return `valid with ${resolved.problems.length} problem(s): ${resolved.problems
+    .map((p) => `${p.scope}/${p.code}`)
+    .join(", ")}`;
+}
+
+/** doctor の gate CLI 適合表示。digest 検証は実施する（モデル呼び出し 0 回）。 */
+async function describeGateCli(executable: string | undefined): Promise<string> {
+  if (executable === undefined) return "not configured (CLI 適合: unverified)";
+  const digest = await verifyExecutableDigest(executable, PINNED_GATE_SHA256);
+  if (digest.ok) return `${executable} (digest verified: ${PINNED_GATE_SHA256.slice(0, 8)}…)`;
+  if (digest.code === "digest-mismatch") {
+    return `${executable} — digest MISMATCH against pinned ${PINNED_GATE_SHA256.slice(0, 8)}… (CLI は実行しない)`;
+  }
+  return `${executable} — unreadable (${digest.code}); CLI 適合 unverified`;
+}
+
+function describeConflicts(ctxCwd: string, agentDir: string): string {
+  // 既知の競合: 旧 pi-omplike-advisor、legacy jp-quality-gate Pi integration。
+  // settings.json の extensions を best-effort で走査する（trust に関係なく
+  // global settings の記録だけを見る。本文は読まない）。
+  const found: string[] = [];
+  for (const settingsPath of [
+    joinPath(agentDir, "settings.json"),
+    joinPath(ctxCwd, ".pi", "settings.json"),
+  ]) {
+    try {
+      const text = readSettingsFile(settingsPath);
+      if (text === undefined) continue;
+      const extensions = parseExtensionNames(text);
+      for (const name of extensions) {
+        if (name.includes("pi-omplike-advisor") || name.includes("jp-quality-gate")) {
+          found.push(`${settingsPath}: ${name}`);
+        }
+      }
+    } catch {
+      // 読めない設定は競合未検出として扱う（doctor は診断のみ）。
+    }
+  }
+  return found.length > 0 ? `detected: ${found.join(", ")}` : "none detected (best-effort scan)";
+}
+
+import { readFileSync as readFileSetting } from "node:fs";
+import { join as joinPath } from "node:path";
+
+function readSettingsFile(path: string): string | undefined {
+  try {
+    return readFileSetting(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function parseExtensionNames(text: string): string[] {
+  try {
+    const parsed = JSON.parse(text) as { extensions?: unknown; packages?: unknown };
+    const names: string[] = [];
+    for (const key of ["extensions", "packages"] as const) {
+      const value = parsed[key];
+      if (!Array.isArray(value)) continue;
+      for (const item of value) {
+        if (typeof item === "string") names.push(item);
+        else if (item !== null && typeof item === "object" && typeof (item as { source?: unknown }).source === "string") {
+          names.push((item as { source: string }).source);
+        }
+      }
+    }
+    return names;
+  } catch {
+    return [];
+  }
 }

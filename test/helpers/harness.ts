@@ -9,7 +9,7 @@
  * - authPath / modelsPath / modelsStorePath / agentDir / cwd / session を一時ディレクトリに置き、
  *   ユーザーの ~/.pi や実 credentials に触れない
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,6 +23,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { createQualityFlowExtension, type Finalizer } from "../../src/extension.ts";
+import type { QualityFlowConfigStore } from "../../src/config/store.ts";
+import { GATE_BIN } from "./gate-bin.ts";
 import {
   createMockProviderExtension,
   MOCK_PROVIDER,
@@ -39,6 +41,16 @@ export interface HarnessOptions {
   finalize?: Finalizer;
   /** 固定版 jp-quality-gate の executable（日本語検証の契約試験用）。 */
   gateExecutable?: string;
+  /** pi-quality-flow の global 設定ディレクトリ（テスト隔離用）。未指定は agentDir。 */
+  configAgentDir?: string;
+  /** project trust（設定解決試験用）。未指定は未信頼。 */
+  projectTrusted?: boolean;
+  /** pi-quality-flow の設定 store 観測 hook（設定変更の競合試験用）。 */
+  configStoreHook?: (store: QualityFlowConfigStore) => void;
+  /** global 設定ファイル（<agentDir>/quality-flow.json）に書く内容。 */
+  globalConfig?: unknown;
+  /** project 設定ファイル（<cwd>/.pi/quality-flow.json）に書く内容。 */
+  projectConfig?: unknown;
   /** 永続 session（保存・resume 試験用）。未指定は in-memory。 */
   persistent?: boolean;
   /** 既存 session file を resume する（保存／resume 契約試験用）。persistent より優先。 */
@@ -60,6 +72,8 @@ export interface Harness {
   turnMappingEntries: () => Array<Record<string, unknown>>;
   /** pi-quality-flow の check 記録（session entry から復元）。 */
   checkEntries: () => Array<Record<string, unknown>>;
+  /** customType で絞った session entry（config / notify / config-problem など）。 */
+  typedEntries: (customType: string) => Array<Record<string, unknown>>;
   /** mock provider が受けた request 群。 */
   mockState: MockState;
   events: () => Array<{ type: string; [key: string]: unknown }>;
@@ -101,14 +115,34 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
   };
   const qualityExtension: InlineExtension = {
     name: "pi-quality-flow",
-    factory: createQualityFlowExtension({ finalize: options.finalize, gateExecutable: options.gateExecutable }),
+    factory: createQualityFlowExtension({
+      finalize: options.finalize,
+      // 採用シーム（finalize）は pre gate が使える構成だけを対象にする。
+      // 契約試験では固定版 binary を既定で渡す。
+      gateExecutable: options.gateExecutable ?? (options.finalize !== undefined ? GATE_BIN : undefined),
+      configAgentDir: options.configAgentDir ?? agentDir,
+      configStoreHook: options.configStoreHook,
+    }),
     hidden: true,
   };
 
-  const settingsManager = SettingsManager.inMemory({
-    compaction: { enabled: false },
-    retry: { enabled: false },
-  });
+  const settingsManager = SettingsManager.inMemory(
+    {
+      compaction: { enabled: false },
+      retry: { enabled: false },
+    },
+    { projectTrusted: options.projectTrusted ?? false },
+  );
+
+  // 設定ファイルは session_start（拡張の loadQualityFlowConfig）より先に配置する。
+  if (options.globalConfig !== undefined) {
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "quality-flow.json"), JSON.stringify(options.globalConfig, null, 2), "utf8");
+  }
+  if (options.projectConfig !== undefined) {
+    await mkdir(join(cwd, ".pi"), { recursive: true });
+    await writeFile(join(cwd, ".pi", "quality-flow.json"), JSON.stringify(options.projectConfig, null, 2), "utf8");
+  }
 
   const loader = new DefaultResourceLoader({
     cwd,
@@ -156,6 +190,13 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
       .map((e) => (e as { customType: string; data?: unknown }).data as Record<string, unknown>);
   };
 
+  const readTypedEntries = (): Array<{ customType: string; data?: unknown }> => {
+    return session.sessionManager
+      .getEntries()
+      .filter((e) => e.type === "custom")
+      .map((e) => e as { customType: string; data?: unknown });
+  };
+
   return {
     session,
     dir,
@@ -166,6 +207,11 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
       readEntries().filter((e) => e && typeof e === "object" && "candidateId" in e && "turnIndex" in e && !("inputHash" in e)),
     checkEntries: () =>
       readEntries().filter((e) => e && typeof e === "object" && "status" in e && "scope" in e),
+    /** customType で絞った session entry（config / notify / config-problem など）。 */
+    typedEntries: (customType: string) =>
+      readTypedEntries()
+        .filter((e) => e.customType === customType)
+        .map((e) => e.data as Record<string, unknown>),
     mockState,
     events: () => capturedEvents,
     cleanup: async () => {

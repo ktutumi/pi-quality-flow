@@ -3,6 +3,8 @@
  *
  * - `PI_QF_REWRITE_FILE`（JSON）を読み、採用本文を返す
  * - `PI_QF_REWRITE_FILE` 未設定時は fail-closed（置換しない）
+ * - `PI_QF_GATE_BIN` を gate executable として渡す（採用シームは pre gate が
+ *   使える構成だけを対象にする。契約試験では固定版 binary を使う）
  *
  * 本番エントリ（extensions/index.ts）からは読み込まれない。テストのみで -e で渡す。
  *
@@ -17,6 +19,7 @@ interface RewriteFixture {
 }
 
 export default createQualityFlowExtension({
+  gateExecutable: process.env.PI_QF_GATE_BIN,
   finalize: () => {
     const path = process.env.PI_QF_REWRITE_FILE;
     if (!path) return undefined;

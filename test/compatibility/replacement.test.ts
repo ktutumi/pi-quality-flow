@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assistantText, createHarness, createMockModel, lastAssistantMessage } from "../helpers/harness.ts";
+import { GATE_BIN } from "../helpers/gate-bin.ts";
 import { sha256Utf8 } from "../../src/pi/adapter.ts";
 
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -189,6 +190,8 @@ test("P01: 実バイナリ TUI 最終表示が採用本文（PTY）", async () =
       PI_SKIP_VERSION_CHECK: "1",
       PI_QF_MOCK_SCRIPT: join(work, "mock-script.json"),
       PI_QF_REWRITE_FILE: join(work, "rewrite.json"),
+      // 採用シームは pre gate が使える構成だけを対象にする（固定版 binary）。
+      PI_QF_GATE_BIN: GATE_BIN,
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
