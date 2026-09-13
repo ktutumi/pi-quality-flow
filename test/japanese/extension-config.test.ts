@@ -293,7 +293,7 @@ test("/quality status はモデル解決・権限・backend・CLI 適合を分�
     assert.match(message, /configRevision=/);
     assert.match(message, /model \(formatter\):/, "モデル解決の行");
     assert.match(message, /security: cloudEgress=deny/, "権限の行");
-    assert.match(message, /backend=stateless-api \(compat: unverified\)/, "backend 適合の行（未確認を ready と表示しない）");
+    assert.match(message, /backend=stateless-api \(compat: unverified/, "backend 適合の行（未確認を ready と表示しない）");
     assert.match(message, /gate CLI: executable configured/, "CLI 適合の行");
     assert.doesNotMatch(message, /\bready\b/, "未確認を ready と表示しない");
   } finally {
@@ -315,6 +315,8 @@ test("/quality doctor はモデル呼び出し 0 回で CLI digest を検証す�
     const message = notifies.map((n) => String(n.message)).join("\n");
     assert.match(message, /doctor \(model calls: 0\)/);
     assert.match(message, /digest verified/, "固定版 digest の検証結果");
+    assert.match(message, /backend: stateless-api — compat unverified/, "backend 適合は記録に基づく表示（not ready）");
+    assert.match(message, /\(not ready\)/, "実送信試験未了を ready と表示しない");
   } finally {
     await harness.cleanup();
   }

@@ -318,7 +318,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       `extension: ${cfg.enabled ? "on" : "off"} (configRevision=${snapshot.revision}, ${snapshot.lastChangeReason})`,
       `japanese: ${jp.enabled ? "on" : "off"}, mode=${jp.mode}, profile=${jp.profile}, deadline=${jp.deadlineMs}ms`,
       `gate: ${jp.gate.enabled ? "on" : "off"}, trigger=${jp.gate.trigger}, command=${jp.gate.command}`,
-      `formatter: backend=${jp.formatter.backend} (compat: unverified)`,
+      `formatter: backend=${jp.formatter.backend} (compat: ${describeBackendCompat()})`,
       `model (formatter): ${describeModelResolution(cfg)}`,
       `security: cloudEgress=${cfg.security.cloudEgress}, allowlist=[advisor:${cfg.security.allowedModels.advisor.length}, formatter:${cfg.security.allowedModels.formatter.length}]`,
       `gate CLI: ${resolveGateExecutable() ? "executable configured" : "not configured"}`,
@@ -345,8 +345,15 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
     );
     if (!allowed) return `configured (${model.provider}/${model.modelId ?? "?"}) not in allowlist`;
     // 解決は ModelRegistry での適合確認（Issue #5）まで行わない。ready とは表示しない。
-    return `configured (${model.provider}/${model.modelId ?? "?"}) — compatibility unverified`;
+    return `configured (${model.provider}/${model.modelId ?? "?"}) — compat ${describeBackendCompat()}`;
   };
+
+  /**
+   * backend の適合状態（docs/compat/formatter-backend.md の記録に基づく表示）。
+   * 実送信試験が完了していないため未検証。記録が検証済みになったら
+   * ここに packaged 記録の状態を反映する（ユーザー設定では上書きしない）。
+   */
+  const describeBackendCompat = (): string => "unverified (live run pending; see docs/compat/formatter-backend.md)";
 
   /** 設定問題の通知（障害通知と同じ扱い。ui.notifyOnFailure に従う）。 */
   const notifyProblems = (
@@ -615,7 +622,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
               `config: ${describeConfigValidity(resolved)}`,
               `gate CLI: ${await describeGateCli(executable)}`,
               `model (formatter): ${describeModelResolution(snapshot.config)}`,
-              `backend: ${snapshot.config.japanese.formatter.backend} — compatibility unverified (not ready)`,
+              `backend: ${snapshot.config.japanese.formatter.backend} — compat ${describeBackendCompat()} (not ready)`,
               `conflicts: ${describeConflicts(ctx.cwd, options.configAgentDir ?? getAgentDir())}`,
               `egress: ${snapshot.config.security.cloudEgress === "deny" ? "denied (local validation only)" : "allowed"}`,
             ];
