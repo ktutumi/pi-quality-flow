@@ -3,7 +3,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { QualityFlowConfigStore } from "../../src/config/store.ts";
+import { QualityFlowConfigStore, shouldKeepLastKnownGood } from "../../src/config/store.ts";
+import type { ConfigLayerProblem } from "../../src/config/loader.ts";
 
 test("初期 snapshot は defaults・revision 0", () => {
   const store = new QualityFlowConfigStore();
@@ -70,4 +71,25 @@ test("japanese on/off の変更で japanese.enabled だけが変わる", () => {
   assert.equal(change.snapshot.config.japanese.enabled, false);
   assert.equal(change.snapshot.config.enabled, true);
   assert.equal(change.snapshot.config.japanese.mode, "always");
+});
+
+test("last-known-good の維持判定: layer 拒否のときだけ維持する", () => {
+  const store = new QualityFlowConfigStore();
+  store.setEnabled(false, "previous-good");
+  const previous = store.current;
+  const problem = (code: ConfigLayerProblem["code"]): ConfigLayerProblem =>
+    ({ scope: "global", path: "quality-flow.json", code, issues: [], legacy: [] });
+
+  // layer 拒否 → 維持。
+  assert.equal(shouldKeepLastKnownGood([problem("schema-invalid")], previous), true);
+  assert.equal(shouldKeepLastKnownGood([problem("invalid-json")], previous), true);
+  assert.equal(shouldKeepLastKnownGood([problem("legacy-config")], previous), true);
+  // 剥がし / 組合せ通知は設定採用済み → 維持しない（新しい設定を採用）。
+  assert.equal(shouldKeepLastKnownGood([problem("project-stripped")], previous), false);
+  assert.equal(shouldKeepLastKnownGood([problem("invalid-combination")], previous), false);
+  // 問題なし → 維持しない。
+  assert.equal(shouldKeepLastKnownGood([], previous), false);
+  // 初回（lastChangeReason=initial）では defaults が last-known-good 相当 → 維持しない。
+  const fresh = new QualityFlowConfigStore();
+  assert.equal(shouldKeepLastKnownGood([problem("schema-invalid")], fresh.current), false);
 });

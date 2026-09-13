@@ -10,9 +10,10 @@
  */
 import { createHash } from "node:crypto";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { MAX_SOURCE_BYTES_LIMIT } from "../config/schema.ts";
 
-/** 自動処理の対象となる原文の上限（UTF-8 bytes）。設定面は Issue #4。 */
-export const MAX_SOURCE_BYTES = 8192;
+/** 自動処理の対象となる原文の上限の既定値（設計書 第19章）。設定値は呼び出し側が渡す。 */
+export const MAX_SOURCE_BYTES = MAX_SOURCE_BYTES_LIMIT;
 
 export type EligibilityCode =
   | "ok"
@@ -38,9 +39,12 @@ export type Eligibility =
  *
  * - 正常 `stop` のみ対象（length / toolUse / error / aborted / deferred / 未知は対象外）
  * - 非空の text block が1つの場合のみ対象。thinking 等の非 text block は保持対象
- * - 原文が 8192 bytes を超えたら候補全体を skip
+ * - 原文が設定上限（maxSourceBytes、既定は 8192）を超えたら候補全体を skip
  */
-export function isEligibleTerminalCandidate(message: AssistantMessage): Eligibility {
+export function isEligibleTerminalCandidate(
+  message: AssistantMessage,
+  maxSourceBytes: number = MAX_SOURCE_BYTES,
+): Eligibility {
   if (message.role !== "assistant") return { ok: false, code: "not-assistant" };
   if (message.stopReason !== "stop") return { ok: false, code: "not-normal-stop" };
 
@@ -65,7 +69,7 @@ export function isEligibleTerminalCandidate(message: AssistantMessage): Eligibil
   }
 
   const { index, text } = nonEmptyText[0];
-  if (Buffer.byteLength(text, "utf8") > MAX_SOURCE_BYTES) {
+  if (Buffer.byteLength(text, "utf8") > maxSourceBytes) {
     return { ok: false, code: "source-too-large" };
   }
 

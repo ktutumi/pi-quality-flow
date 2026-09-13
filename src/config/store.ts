@@ -6,12 +6,29 @@
  * - 不正な値は受け付けない（呼び出し側で検証済みの値だけを渡す）
  */
 
-import { deepMergeConfig } from "./merge.ts";
 import {
   DEFAULT_CONFIG,
   type JapaneseMode,
   type QualityFlowConfig,
 } from "./schema.ts";
+import type { ConfigLayerProblem } from "./loader.ts";
+
+/**
+ * 不正 layer の読み込み時に、以前の snapshot（last-known-good）を維持すべきか。
+ * layer 拒否（読めない / schema 不正 / legacy）のときだけ維持する。
+ * 剥がし通知（project-stripped）と組合せ通知（invalid-combination）は設定自体が
+ * 採用済みのため対象外。初回読み込み（previous.lastChangeReason=initial）では
+ * defaults が last-known-good 相当になるため維持判定は false。
+ */
+export function shouldKeepLastKnownGood(
+  problems: readonly ConfigLayerProblem[],
+  previous: ConfigSnapshot,
+): boolean {
+  const rejected = problems.some(
+    (p) => p.code !== "project-stripped" && p.code !== "invalid-combination",
+  );
+  return rejected && previous.lastChangeReason !== "initial";
+}
 
 export interface ConfigSnapshot {
   config: QualityFlowConfig;
@@ -68,10 +85,9 @@ export class QualityFlowConfigStore {
   }
 
   private update(patch: Partial<QualityFlowConfig>, reason: string): ConfigChange {
-    const merged = deepMergeConfig(this.snapshot.config, {
-      ...structuredClone(this.snapshot.config),
-      ...patch,
-    } as QualityFlowConfig);
+    // patch の section は呼び出し側が現在値から組み立てた完全な section なので、
+    // 浅い spread で足りる（merge module は不要）。
+    const merged = { ...structuredClone(this.snapshot.config), ...patch } as QualityFlowConfig;
     this.snapshot = {
       config: merged,
       revision: this.snapshot.revision + 1,

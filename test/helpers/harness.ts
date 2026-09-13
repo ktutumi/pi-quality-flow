@@ -34,6 +34,22 @@ import {
   type MockState,
 } from "./mock-provider.ts";
 
+/**
+ * 採用シーム（finalize）を起動してよい「承認済み構成」の設定断片。
+ * seam は approved backend の mock であり、送信許可（cloud egress allow と
+ * role 別 allowlist、model は allowlist 内）を満たす設定と組合せて使う。
+ */
+export const APPROVED_FORMATTER_CONFIG = {
+  security: {
+    cloudEgress: "allow",
+    allowedModels: { advisor: [], formatter: [`${MOCK_PROVIDER}/${MOCK_MODEL_ID}`] },
+    allowProjectModelOverride: false,
+    allowProjectExecutableOverride: false,
+    allowProjectPromptOverride: false,
+  },
+  japanese: { model: { provider: MOCK_PROVIDER, modelId: MOCK_MODEL_ID } },
+} as const;
+
 export interface HarnessOptions {
   /** mock provider が返す応答（順に消費）。 */
   responses: MockResponse[];
@@ -135,9 +151,17 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
   );
 
   // 設定ファイルは session_start（拡張の loadQualityFlowConfig）より先に配置する。
-  if (options.globalConfig !== undefined) {
+  // finalize seam（approved backend の mock）を注入するときは、承認済みの送信許可
+  // 設定を既定にする（egress deny のままでは seam は起動しない）。
+  const effectiveGlobalConfig =
+    options.globalConfig !== undefined
+      ? options.globalConfig
+      : options.finalize !== undefined
+        ? APPROVED_FORMATTER_CONFIG
+        : undefined;
+  if (effectiveGlobalConfig !== undefined) {
     await mkdir(agentDir, { recursive: true });
-    await writeFile(join(agentDir, "quality-flow.json"), JSON.stringify(options.globalConfig, null, 2), "utf8");
+    await writeFile(join(agentDir, "quality-flow.json"), JSON.stringify(effectiveGlobalConfig, null, 2), "utf8");
   }
   if (options.projectConfig !== undefined) {
     await mkdir(join(cwd, ".pi"), { recursive: true });

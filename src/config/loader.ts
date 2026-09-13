@@ -27,13 +27,14 @@ import { detectLegacyKeys, type LegacyFinding } from "./legacy.ts";
 export type ConfigLayerScope = "global" | "project";
 
 export interface ConfigLayerProblem {
-  scope: ConfigLayerScope;
+  scope: ConfigLayerScope | "merged";
   path: string;
   code:
     | "invalid-json"
     | "schema-invalid"
     | "legacy-config"
     | "project-stripped"
+    | "invalid-combination"
     | "read-failed";
   issues: ConfigIssue[];
   legacy: LegacyFinding[];
@@ -154,6 +155,17 @@ export function loadQualityFlowConfig(input: LoadQualityFlowConfigInput): Resolv
 
   const mergedValidated = validateQualityFlowConfig(mergedRaw);
   if (mergedValidated.ok) {
+    // 不正組合せ（gate 無効 + mode 非off）は layer を捨てず、通知だけ出して
+    // 自動修正を無効化する（mode 表: gate.enabled=false + gate/always）。
+    if (!mergedValidated.config.japanese.gate.enabled && mergedValidated.config.japanese.mode !== "off") {
+      problems.push({
+        scope: "merged",
+        path: "japanese.mode",
+        code: "invalid-combination",
+        issues: [],
+        legacy: [],
+      });
+    }
     return { config: mergedValidated.config, sources, problems };
   }
 

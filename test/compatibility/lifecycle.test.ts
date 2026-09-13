@@ -12,7 +12,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -29,7 +29,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createQualityFlowExtension } from "../../src/extension.ts";
 import { isEligibleTerminalCandidate, sha256Utf8, MAX_SOURCE_BYTES } from "../../src/pi/adapter.ts";
-import { createHarness, createMockModel } from "../helpers/harness.ts";
+import { createHarness, createMockModel, APPROVED_FORMATTER_CONFIG } from "../helpers/harness.ts";
 import { GATE_BIN } from "../helpers/gate-bin.ts";
 import {
   createMockProviderExtension,
@@ -221,6 +221,9 @@ test("session 切替: runtime newSession / fork で session_start reason が届�
   const cwd = join(dir, "project");
   // session の保存先と project cwd を実在させ、ユーザーの ~/.pi に触れないようにする。
   await mkdir(cwd, { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  // 採用シームは承認済み構成だけを対象にする（egress allow + allowlist + model）。
+  await writeFile(join(agentDir, "quality-flow.json"), JSON.stringify(APPROVED_FORMATTER_CONFIG), "utf8");
   const sessionDir = join(dir, "sessions");
 
   try {

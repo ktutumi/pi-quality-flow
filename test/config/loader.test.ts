@@ -247,18 +247,19 @@ test("旧 rejectRegression / failOpen は移行プレビュー付きで layer �
   }
 });
 
-test("layer 単独では正当でも merge で不正になる場合 project layer を落とす", async () => {
+test("merge 後の不正組合せ（gate 無効 + mode gate/always）は通知して採用する", async () => {
   const env = await makeEnv();
   try {
     await writeGlobal(env.agentDir, { japanese: { gate: { enabled: false } } });
     await writeProject(env.cwd, { japanese: { mode: "always" } });
     const result = loadQualityFlowConfig({ agentDir: env.agentDir, cwd: env.cwd, projectTrusted: true });
-    // global 単独: gate off + mode always(default) は不正だが、global 単独検証では
-    // mode が defaults の always になるため schema-invalid になる。
-    // → global も落ち、defaults（gate on, mode always）が last-known-good。
+    // layer 単独では正当でも merge で mode 表の不正組合せになる。
+    // 設定は採用し、通知だけ出す（自動修正は gate 無効のため停止する）。
     assert.equal(result.config.japanese.mode, "always");
-    assert.equal(result.config.japanese.gate.enabled, true);
-    assert.ok(result.problems.length >= 1);
+    assert.equal(result.config.japanese.gate.enabled, false);
+    const combo = result.problems.find((p) => p.code === "invalid-combination");
+    assert.ok(combo, "invalid-combination が通知される");
+    assert.equal(combo.scope, "merged");
   } finally {
     await env.cleanup();
   }

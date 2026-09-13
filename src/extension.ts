@@ -21,11 +21,12 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { CandidateLedger, type CandidateRecord } from "./coordinator/candidates.ts";
 import { loadQualityFlowConfig, type ResolvedConfig } from "./config/loader.ts";
-import { QualityFlowConfigStore, type ConfigSnapshot } from "./config/store.ts";
+import { QualityFlowConfigStore, shouldKeepLastKnownGood, type ConfigSnapshot } from "./config/store.ts";
 import { shouldTriggerFormatter } from "./config/trigger.ts";
 import { PINNED_GATE_SHA256, verifyExecutableDigest } from "./jpqg/runner.ts";
 import {
   isEligibleTerminalCandidate,
+  MAX_SOURCE_BYTES,
   replaceSingleTextBlock,
   sha256Utf8,
 } from "./pi/adapter.ts";
@@ -84,6 +85,8 @@ export async function finalizeAssistantMessage(input: {
   /** claim 時点の configRevision。置換前に再検査する（in-flight 無効化）。 */
   configRevision?: number;
   isConfigCurrent?: (revision: number) => boolean;
+  /** 解決済みの原文上限（UTF-8 bytes、設計書 第19章の japanese.maxSourceBytes）。 */
+  maxSourceBytes?: number;
   /**
    * pre gate（原文の検証）。single-flight claim の後・採用判断の前に
    * 1回だけ実行する（重複 event による複数回 CLI 呼び出しを防ぐ）。
@@ -91,7 +94,8 @@ export async function finalizeAssistantMessage(input: {
   preGate?: (text: string) => Promise<CheckJapaneseResult>;
 }): Promise<FinalizeResult> {
   const { message, pendingMessages, ledger, finalize, preGate } = input;
-  const eligibility = isEligibleTerminalCandidate(message);
+  const maxSourceBytes = input.maxSourceBytes ?? MAX_SOURCE_BYTES;
+  const eligibility = isEligibleTerminalCandidate(message, maxSourceBytes);
   if (!eligibility.ok) {
     return { outcome: "skipped", reason: eligibility.code };
   }
@@ -116,6 +120,7 @@ export async function finalizeAssistantMessage(input: {
   const record: CandidateRecord = claim.record;
 
   // pre gate は candidate 単位で最大1回（claim 後）。原文を対象とする。
+  // 原文上限は isEligibleTerminalCandidate(maxSourceBytes) で claim 前に確認済み。
   let preGateResult: CheckJapaneseResult | undefined;
   if (preGate) {
     preGateResult = await preGate(eligibility.text);
@@ -185,6 +190,10 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
   const store = new QualityFlowConfigStore();
   /** session_start 時の解決結果（status / doctor の表示用）。 */
   let resolved: ResolvedConfig | undefined;
+  /** 現在有効な設定の出所（last-known-good 保持時は旧解決の sources）。 */
+  let effectiveSources: ResolvedConfig["sources"] | undefined;
+  /** 不正 layer で以前の設定を維持しているか（status 表示用）。 */
+  let keptLastKnownGood = false;
   /** 現在の final response（正常 stop の本文）。手動 check の対象。 */
   let lastFinalText: string | undefined;
   /** 最後の gate check（status 表示用）。 */
@@ -204,21 +213,42 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
     if (!cfg.enabled) return { run: false, reason: "extension-disabled" };
     if (!cfg.japanese.enabled) return { run: false, reason: "japanese-disabled" };
     if (!cfg.japanese.gate.enabled) {
-      // mode 非off との組合せは loader / command で拒否済み。ここに届かない。
+      // 不正組合せ（gate 無効 + mode 非off）は loader で通知済み。自動処理は停止。
       return { run: false, reason: "gate-disabled" };
     }
     return { run: true, reason: "pre-gate" };
   };
 
-  /** 本文置換（修正適用）の可否。mode off は validation-only で置換しない。 */
-  const correctionAllowed = (snapshot: ConfigSnapshot): boolean => {
+  /**
+   * Formatter の実行権限（送信許可と backend 適合、設計書 第27.2章）。
+   * backend は許可値が stateless-api（remote API backend）のみのため、
+   * remote として cloud egress + role 別 allowlist を必須にする。
+   * local backend を許可値に追加するときは locality 別の条件をこの先に書く
+   * （local model でも role 別 allowlist は必要）。未知 backend は fail-closed。
+   */
+  const formatterPermission = (
+    snapshot: ConfigSnapshot,
+  ): { allowed: boolean; reason: string } => {
     const cfg = snapshot.config;
-    return (
-      cfg.enabled &&
-      cfg.japanese.enabled &&
-      cfg.japanese.gate.enabled &&
-      cfg.japanese.mode !== "off"
-    );
+    const jp = cfg.japanese;
+    if (!cfg.enabled || !jp.enabled) return { allowed: false, reason: "extension-or-japanese-disabled" };
+    if (!jp.gate.enabled) return { allowed: false, reason: "gate-disabled" };
+    if (jp.mode === "off") return { allowed: false, reason: "mode-off" };
+    if (jp.formatter.backend !== "stateless-api") {
+      return { allowed: false, reason: "backend-unavailable" };
+    }
+    if (cfg.security.cloudEgress !== "allow") {
+      return { allowed: false, reason: "egress-denied" };
+    }
+    const allowlist = cfg.security.allowedModels.formatter;
+    if (allowlist.length === 0) return { allowed: false, reason: "allowlist-empty" };
+    const model = jp.model;
+    const modelAllowed =
+      model?.provider !== undefined &&
+      model.modelId !== undefined &&
+      allowlist.includes(`${model.provider}/${model.modelId}`);
+    if (!modelAllowed) return { allowed: false, reason: "model-not-allowed" };
+    return { allowed: true, reason: "permitted" };
   };
 
   /** check 結果を session entry に記録する（LLM context には participation しない）。 */
@@ -373,7 +403,19 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         projectTrusted: ctx.isProjectTrusted(),
       });
       resolved = result;
-      store.reload(result.config, `session_start:${event.reason}`);
+      // 不正 layer（読めない / schema 不正 / legacy）があれば last-known-good を
+      // 維持する。勝手に制約の弱い defaults に戻さない（設計書 第27.2章）。
+      // 剥がし通知（project-stripped）と組合せ通知（invalid-combination）は
+      // 設定自体は採用済みのため対象外。
+      if (shouldKeepLastKnownGood(result.problems, store.current)) {
+        keptLastKnownGood = true;
+        // effectiveSources は現在有効な設定の出所（旧解決結果）を維持する。
+        store.reload(store.current.config, `session_start:${event.reason}:kept-last-known-good`);
+      } else {
+        keptLastKnownGood = false;
+        effectiveSources = result.sources;
+        store.reload(result.config, `session_start:${event.reason}`);
+      }
       notifyProblems(pi, ctx, result);
       // session_start の全 reason（startup / new / resume / fork / reload）を
       // 契約観測のため entry に残す。
@@ -428,6 +470,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         message,
         pendingMessages: ctx.hasPendingMessages(),
         ledger,
+        maxSourceBytes: snapshot.config.japanese.maxSourceBytes,
         // 採用シーム: mode 表（第13章）に従い、pre gate の後で trigger を評価して
         // から Formatter（mock seam）を起動する。OFF / mode off / trigger 不成立 /
         // pre gate 不使用では Formatter を開始しない（原文維持）。
@@ -436,10 +479,6 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
             // pre gate 実行中に設定が変わった（OFF / mode 変更 / reload）。
             // 以後の stage（Formatter）を開始しない（設計書 第33.2章）。
             formatterDecision = "stale-config";
-            return undefined;
-          }
-          if (!correctionAllowed(snapshot)) {
-            formatterDecision = snapshot.config.japanese.mode === "off" ? "mode-off" : "extension-or-japanese-disabled";
             return undefined;
           }
           const pre = input.preGate;
@@ -457,6 +496,8 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
             return undefined;
           }
           const jp = snapshot.config.japanese;
+          // trigger と権限は別の状態として評価・表示する（Issue #4 AC）。
+          // trigger を先に評価し、permission は finalize 直前だけ確認する。
           triggeredResult =
             jp.mode === "always" ||
             shouldTriggerFormatter(pre.check.score, jp.gate.trigger);
@@ -464,8 +505,14 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
             formatterDecision = "gate-not-triggered";
             return undefined;
           }
+          const permission = formatterPermission(snapshot);
+          if (!permission.allowed) {
+            // 送信不許可 / backend 未適合など。ローカル検証のみで留める。
+            formatterDecision = permission.reason;
+            return undefined;
+          }
           if (!finalize) {
-            // backend 未適合 / egress 不許可相当。ローカル検証のみで留める。
+            // 権限はあっても backend seam が未提供。ローカル検証のみで留める。
             formatterDecision = "formatter-unavailable";
             return undefined;
           }
@@ -556,7 +603,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
             const lines = [
               `pi-quality-flow (configRevision=${snapshot.revision})`,
               ...configLines(snapshot),
-              describeSources(resolved),
+              describeSources(effectiveSources, keptLastKnownGood, resolved),
             ];
             notify(lines.join("\n"));
             return;
@@ -688,18 +735,25 @@ function recordConfigChange(
   pi.appendEntry("pi-quality-flow:config-rejected", { label, reason: change.reason });
 }
 
-function describeSources(resolved: ResolvedConfig | undefined): string {
-  if (resolved === undefined) return "sources: not loaded";
+function describeSources(
+  effective: ResolvedConfig["sources"] | undefined,
+  keptLastKnownGood: boolean,
+  resolved: ResolvedConfig | undefined,
+): string {
+  if (effective === undefined) return "sources: not loaded";
   const parts = ["defaults"];
-  if (resolved.sources.globalPath !== undefined) {
-    parts.push(`global(${resolved.sources.globalPath})`);
+  if (effective.globalPath !== undefined) {
+    parts.push(`global(${effective.globalPath})`);
   }
   parts.push(
-    resolved.sources.projectTrusted
-      ? `project(${resolved.sources.projectPath ?? "n/a"})`
+    effective.projectTrusted
+      ? `project(${effective.projectPath ?? "n/a"})`
       : "project: skipped (untrusted)",
   );
-  return `sources: ${parts.join(" → ")}`;
+  const chain = `sources: ${parts.join(" → ")}`;
+  if (!keptLastKnownGood) return chain;
+  // 不正 layer により以前の設定を維持している。出所と最新の問題を両方示す。
+  return `${chain} (kept last-known-good; config problem: ${describeConfigValidity(resolved)})`;
 }
 
 function describeConfigValidity(resolved: ResolvedConfig | undefined): string {

@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { assistantText } from "../helpers/harness.ts";
 import { GATE_BIN } from "../helpers/gate-bin.ts";
+import { APPROVED_FORMATTER_CONFIG } from "../helpers/harness.ts";
 
 const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const MOCK_EXT = join(ROOT, "test", "helpers", "mock-provider-extension.ts");
@@ -79,6 +80,9 @@ async function prepareDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "pi-qf-cli-"));
   await mkdir(join(dir, "project"), { recursive: true });
   await mkdir(join(dir, "agent"), { recursive: true });
+  // 採用シーム（finalizer-extension）は承認済み構成だけを対象にするため、
+  // 固定版 binary と承認済み送信許可の設定を agent dir に書く。
+  await writeFile(join(dir, "agent", "quality-flow.json"), JSON.stringify(APPROVED_FORMATTER_CONFIG), "utf8");
   return dir;
 }
 

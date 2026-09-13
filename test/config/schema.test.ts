@@ -155,12 +155,11 @@ test("原文上限: 8192 は受理、8193 は拒否", () => {
   assert.ok(ng.issues.some((i) => i.path === "japanese.maxSourceBytes" && i.code === "rejected"));
 });
 
-test("gate 無効 + mode 非off の組合せを拒否する", () => {
+test("gate 無効 + mode 非off の組合せは schema では受理し loader で通知する", () => {
+  // mode 表どおり「自動修正を無効化し通知」で扱う（layer は捨てない）。
   for (const mode of ["gate", "always"] as const) {
     const result = validateQualityFlowConfig({ japanese: { gate: { enabled: false }, mode } });
-    assert.equal(result.ok, false, mode);
-    if (result.ok) continue;
-    assert.ok(result.issues.some((i) => i.path === "japanese.mode" && i.code === "rejected"));
+    assert.equal(result.ok, true, mode);
   }
 });
 

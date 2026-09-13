@@ -263,14 +263,8 @@ export function validateQualityFlowConfig(raw: unknown): ValidatedConfig {
     }
   }
 
-  // 論理検査: gate 無効 + mode 非off は不正設定（設計書 第13章）。
-  if (config.japanese.gate.enabled === false && config.japanese.mode !== "off") {
-    issues.push(issue(
-      "japanese.mode",
-      "rejected",
-      `gate.enabled=false のとき mode は off のみ（受け付けた値: ${config.japanese.mode}）`,
-    ));
-  }
+  // gate 無効 + mode 非off の論理検査は schema では拒否しない。
+  // mode 表どおり「自動修正を無効化し通知」で扱う（loader の invalid-combination）。
 
   if (issues.length > 0) return { ok: false, issues };
   return { ok: true, config };
@@ -335,7 +329,8 @@ function readAdvisor(value: unknown, issues: ConfigIssue[]): AdvisorDetailConfig
   for (const key of Object.keys(ADVISOR_ENUMS)) {
     const v = obj[key];
     if (v === undefined) continue;
-    const allowed = ADVISOR_ENUMS[key]!;
+    const allowed = ADVISOR_ENUMS[key];
+    if (allowed === undefined) continue; // Object.keys 由来のため到達しない
     if (typeof v !== "string" || !allowed.has(v)) {
       issues.push(issue(
         `advisor.${key}`,

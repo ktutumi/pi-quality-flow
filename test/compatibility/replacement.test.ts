@@ -18,7 +18,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assistantText, createHarness, createMockModel, lastAssistantMessage } from "../helpers/harness.ts";
+import { assistantText, createHarness, createMockModel, lastAssistantMessage, APPROVED_FORMATTER_CONFIG } from "../helpers/harness.ts";
 import { GATE_BIN } from "../helpers/gate-bin.ts";
 import { sha256Utf8 } from "../../src/pi/adapter.ts";
 
@@ -171,6 +171,11 @@ test("P01: 実バイナリ TUI 最終表示が採用本文（PTY）", async () =
   const work = await mkdtemp(join(tmpdir(), "pi-qf-tui-"));
   await mkdir(join(work, "project"), { recursive: true });
   await mkdir(join(work, "agent"), { recursive: true });
+  // 採用シームは承認済み構成だけを対象にする（egress allow + allowlist + model）。
+  await writeFile(
+    join(work, "agent", "quality-flow.json"),
+    JSON.stringify(APPROVED_FORMATTER_CONFIG),
+  );
   await writeFile(
     join(work, "mock-script.json"),
     JSON.stringify({ responses: [{ text: ORIGINAL, chunkCount: 4, chunkDelayMs: 25 }] }),

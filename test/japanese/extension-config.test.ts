@@ -7,7 +7,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHarness, lastAssistantMessage } from "../helpers/harness.ts";
+import { createHarness, lastAssistantMessage, APPROVED_FORMATTER_CONFIG } from "../helpers/harness.ts";
 import { GATE_BIN, assertGateBinaryPinned } from "../helpers/gate-bin.ts";
 import type { QualityFlowConfigStore } from "../../src/config/store.ts";
 
@@ -48,7 +48,7 @@ test("mode 表: gate.enabled=false + mode off は CLI 0回", async () => {
   }
 });
 
-test("mode 表: gate.enabled=false + mode gate/always は不正設定として拒否され defaults で動く", async () => {
+test("mode 表: gate.enabled=false + mode gate/always は自動処理を停止し通知する", async () => {
   const harness = await createHarness({
     responses: [{ text: JP_TEXT }],
     gateExecutable: GATE_BIN,
@@ -56,13 +56,12 @@ test("mode 表: gate.enabled=false + mode gate/always は不正設定として�
   });
   try {
     await harness.session.prompt("test");
-    // layer 不採用 → last-known-good（defaults: gate on / mode always）で自動検証が動く。
-    assert.equal(harness.checkEntries().length, 1);
-    // 不正設定の通知と問題が記録される。
+    // 不正組合せは layer ごと捨てず「自動修正を無効化し通知」で扱う（mode 表）。
+    assert.equal(harness.checkEntries().length, 0, "gate 無効のため CLI も実行されない");
     const problems = harness.typedEntries("pi-quality-flow:config-problem");
     assert.equal(problems.length, 1);
-    assert.equal(problems[0]?.scope, "global");
-    assert.equal(problems[0]?.code, "schema-invalid");
+    assert.equal(problems[0]?.scope, "merged");
+    assert.equal(problems[0]?.code, "invalid-combination");
   } finally {
     await harness.cleanup();
   }
@@ -98,7 +97,7 @@ test("mode 表: mode gate/always は trigger を評価し、未適合 backend �
       assert.equal(check.length, 1, mode);
       assert.equal(check[0]?.mode, mode);
       assert.equal(check[0]?.triggered, true, "診断があるため trigger 成立");
-      assert.equal(check[0]?.formatterReason, "formatter-unavailable", "backend 未適合のため Formatter は開始しない");
+      assert.equal(check[0]?.formatterReason, "egress-denied", "送信不許可のため Formatter は開始しない");
       assert.equal(harness.mockState.requests.length, 1, "モデル要求は 0（送信不許可）");
     } finally {
       await harness.cleanup();
@@ -136,7 +135,7 @@ test("trigger any: warnings のみでも trigger 成立", async () => {
     await harness.session.prompt("test");
     const check = harness.checkEntries();
     assert.equal(check[0]?.triggered, true);
-    assert.equal(check[0]?.formatterReason, "formatter-unavailable");
+    assert.equal(check[0]?.formatterReason, "egress-denied");
   } finally {
     await harness.cleanup();
   }
@@ -386,6 +385,61 @@ test("gate 実行可能が未設定の場合は CLI を実行しない", async (
 
 const ORIGINAL_FIX = "これは简体字のテストです。";
 const ADOPTED_FIX = "これは簡体字のテストです。";
+
+test("japanese.maxSourceBytes を公開入口で適用する（低上限は gate / finalizer を skip）", async () => {
+  // ORIGINAL_FIX は 39 bytes。上限 20 では全候補 skip、上限 39（境界値）では処理する。
+  let lowCalls = 0;
+  let boundaryCalls = 0;
+  const low = await createHarness({
+    responses: [{ text: ORIGINAL_FIX }],
+    gateExecutable: GATE_BIN,
+    globalConfig: {
+      ...APPROVED_FORMATTER_CONFIG,
+      japanese: {
+        ...APPROVED_FORMATTER_CONFIG.japanese,
+        maxSourceBytes: 20,
+      },
+    },
+    finalize: () => {
+      lowCalls++;
+      return ADOPTED_FIX;
+    },
+  });
+  try {
+    await low.session.prompt("test");
+    assert.equal(low.checkEntries().length, 0, "上限超過は gate に渡さない");
+    assert.equal(lowCalls, 0, "上限超過は finalizer も起動しない");
+    const candidates = low.candidateEntries();
+    assert.equal(candidates.length, 0, "claim 前に skip（candidate 記録なし）");
+    assert.equal(lastAssistantMessage(low.session)?.text, ORIGINAL_FIX, "原文のまま");
+  } finally {
+    await low.cleanup();
+  }
+
+  const boundary = await createHarness({
+    responses: [{ text: ORIGINAL_FIX }],
+    gateExecutable: GATE_BIN,
+    globalConfig: {
+      ...APPROVED_FORMATTER_CONFIG,
+      japanese: {
+        ...APPROVED_FORMATTER_CONFIG.japanese,
+        maxSourceBytes: 39,
+      },
+    },
+    finalize: () => {
+      boundaryCalls++;
+      return ADOPTED_FIX;
+    },
+  });
+  try {
+    await boundary.session.prompt("test");
+    assert.equal(boundary.checkEntries().length, 1, "境界値ちょうどは gate に渡る");
+    assert.equal(boundaryCalls, 1, "境界値ちょうどは finalizer も起動する");
+    assert.equal(lastAssistantMessage(boundary.session)?.text, ADOPTED_FIX, "採用される");
+  } finally {
+    await boundary.cleanup();
+  }
+});
 
 test("置換後の /quality japanese check は採用本文を対象にする", async () => {
   const harness = await createHarness({
