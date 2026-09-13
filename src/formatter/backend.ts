@@ -100,7 +100,7 @@ export interface FormatterModelRegistry {
 }
 
 export type ModelResolution =
-  | { ok: true; model: Model<Api>; endpoint?: string }
+  | { ok: true; model: Model<Api> }
   | { ok: false; code: "model-unresolved" | "auth-unavailable" };
 
 /**
@@ -116,8 +116,9 @@ export function resolveFormatterModel(
   }
   const found = registry.find(model.provider, model.modelId);
   if (!found) return { ok: false, code: "model-unresolved" };
-  if (!registry.hasConfiguredAuth(found)) return { ok: false, code: "auth-unavailable" };
-  return { ok: true, model: found, endpoint: found.baseUrl };
+  if (!registry.hasConfiguredAuth(found))
+    return { ok: false, code: "auth-unavailable" };
+  return { ok: true, model: found };
 }
 
 /**
@@ -140,7 +141,10 @@ export class StatelessApiBackend {
   ) {
     this.registry = registry;
     this.configModel = configModel;
-    this.capabilities = { ...FORMATTER_CAPABILITIES_UNVERIFIED, ...capabilities };
+    this.capabilities = {
+      ...FORMATTER_CAPABILITIES_UNVERIFIED,
+      ...capabilities,
+    };
   }
 
   /** すべての必須 capability が検証済みか（false が1つでもあれば自動有効化しない）。 */
@@ -160,7 +164,11 @@ export class StatelessApiBackend {
     const context: Context = {
       systemPrompt: request.systemPrompt,
       messages: [
-        { role: "user", content: [{ type: "text", text: request.text }], timestamp: Date.now() },
+        {
+          role: "user",
+          content: [{ type: "text", text: request.text }],
+          timestamp: Date.now(),
+        },
       ],
       tools: [],
     };
@@ -178,7 +186,11 @@ export class StatelessApiBackend {
         detail: error instanceof Error ? error.message : String(error),
       };
     }
-    return validateCompletion(message, request.maxOutputBytes, `${resolved.model.provider}/${resolved.model.id}`);
+    return validateCompletion(
+      message,
+      request.maxOutputBytes,
+      `${resolved.model.provider}/${resolved.model.id}`,
+    );
   }
 }
 
@@ -202,11 +214,19 @@ export function validateCompletion(
     case "toolUse":
       return { ok: false, code: "stop-reason-toolUse" };
     case "error":
-      return { ok: false, code: "stop-reason-error", detail: message.errorMessage };
+      return {
+        ok: false,
+        code: "stop-reason-error",
+        detail: message.errorMessage,
+      };
     case "aborted":
       return { ok: false, code: "aborted" };
     default:
-      return { ok: false, code: "stop-reason-unknown", detail: String(message.stopReason) };
+      return {
+        ok: false,
+        code: "stop-reason-unknown",
+        detail: String(message.stopReason),
+      };
   }
 
   const textBlocks = message.content.filter(

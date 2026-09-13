@@ -350,8 +350,8 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
 
   /**
    * backend の適合状態（docs/compat/formatter-backend.md の記録に基づく表示）。
-   * 実送信試験が完了していないため未検証。記録が検証済みになったら
-   * ここに packaged 記録の状態を反映する（ユーザー設定では上書きしない）。
+   * 実送信試験が完了していないため未検証。記録は手動で同期する
+   * （記録が検証済みになったら、この表示と capability 注入を更新する）。
    */
   const describeBackendCompat = (): string => "unverified (live run pending; see docs/compat/formatter-backend.md)";
 
