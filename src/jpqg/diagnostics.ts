@@ -29,7 +29,12 @@ export interface GateDiagnostic {
   end: number;
 }
 
-/** code point offset を UTF-16 code unit offset に変換する。 */
+/**
+ * code point offset を UTF-16 code unit offset に変換する。
+ * 2引数: 単一 offset → number。3引数: 範囲 → [start, end] の組。
+ */
+export function codePointOffsetToUtf16(text: string, start: number): number;
+export function codePointOffsetToUtf16(text: string, start: number, end: number): [number, number];
 export function codePointOffsetToUtf16(
   text: string,
   start: number,
