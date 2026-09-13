@@ -22,6 +22,7 @@ import {
   replaceSingleTextBlock,
   sha256Utf8,
 } from "./pi/adapter.ts";
+import { checkJapanese, type GateCheck } from "./japanese/service.ts";
 
 /** Phase 0A の置換シーム。採用本文を返す。undefined は原文維持。 */
 export type Finalizer = (input: {
@@ -32,6 +33,12 @@ export type Finalizer = (input: {
 export interface QualityFlowOptions {
   /** 省略時は fail-closed: どの candidate も置換しない。 */
   finalize?: Finalizer;
+  /**
+   * 固定版 jp-quality-gate の検証済み executable。
+   * 省略時は日本語検証（自動 validation-only gate / 手動 check）を行わない。
+   * 設定面の解決は Issue #4。
+   */
+  gateExecutable?: string;
 }
 
 export type ExtensionOutcome =
@@ -136,13 +143,76 @@ function appendCandidateEntry(pi: ExtensionAPI, record: CandidateRecord): void {
 }
 
 export function createQualityFlowExtension(options: QualityFlowOptions = {}): ExtensionFactory {
-  const { finalize } = options;
+  const { finalize, gateExecutable } = options;
+  /** 日本語処理全体の初期上限（設計書 第32.1章）。設定面は Issue #4。 */
+  const japaneseDeadlineMs = 10_000;
+
+  /** check 結果を session entry に記録する（LLM context には participation しない）。 */
+  const recordCheck = (
+    pi: ExtensionAPI,
+    source: "auto" | "manual",
+    text: string | undefined,
+    check:
+      | { ok: true; check: GateCheck }
+      | { ok: false; code: string },
+  ): void => {
+    if (!check.ok) {
+      pi.appendEntry("pi-quality-flow:check", {
+        source,
+        scope: "editable-prose",
+        status: "skipped",
+        failureCode: check.code,
+      });
+      return;
+    }
+    const c = check.check;
+    pi.appendEntry("pi-quality-flow:check", {
+      source,
+      scope: c.scope,
+      status: c.status,
+      reason: c.reason,
+      incomplete: c.incomplete,
+      score: c.score,
+      // 診断の詳細は本文断片を含むため entry には rule / 座標のみ。
+      diagnostics: c.diagnostics.map((d) => ({
+        ruleId: d.ruleId,
+        severity: d.severity,
+        start: d.start,
+        end: d.end,
+      })),
+      inputBytes: text === undefined ? undefined : Buffer.byteLength(text, "utf8"),
+      binaryVersion: c.binaryVersion,
+    });
+  };
+
+  /** check 結果の 1 行サマリ（本文断片を含まない）。 */
+  const summarizeCheck = (check: GateCheck): string => {
+    const parts = [
+      `japanese check: ${check.status}`,
+      "scope=editable-prose",
+      `score=${check.score.errors}e/${check.score.warnings}w`,
+    ];
+    if (check.reason) parts.push(`reason=${check.reason}`);
+    if (check.incomplete) parts.push(check.incomplete);
+    if (check.diagnostics.length > 0) {
+      parts.push(
+        check.diagnostics
+          .map((d) => `${d.ruleId}@${d.start}-${d.end}(${d.severity})`)
+          .join(", "),
+      );
+    }
+    return parts.join(" ");
+  };
 
   return (pi: ExtensionAPI) => {
     const ledger = new CandidateLedger();
+    /** 現在の final response（正常 stop の本文）。手動 check の対象。 */
+    let lastFinalText: string | undefined;
 
     pi.on("session_start", (event, ctx) => {
       ledger.beginSession(ctx.sessionManager.getSessionId());
+      // session switch / new / fork で旧 final response を破棄する（Issue #7 の先取り）。
+      lastFinalText = undefined;
       // session_start の全 reason（startup / new / resume / fork / reload）を
       // 契約観測のため entry に残す。Phase 0A の観測対象。
       pi.appendEntry("pi-quality-flow:session", { reason: event.reason });
@@ -172,6 +242,31 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         if (record) appendCandidateEntry(pi, record);
       }
 
+      // 自動 validation-only gate（Issue #3）。
+      // 置換があれば採用本文、なければ原文を検査する。本文は置換しない。
+      if (gateExecutable) {
+        const eligibility = isEligibleTerminalCandidate(message);
+        const finalText = result.replacement?.text ?? (eligibility.ok ? eligibility.text : undefined);
+        if (finalText !== undefined) {
+          const check = await checkJapanese({
+            text: finalText,
+            executable: gateExecutable,
+            signal: ctx.signal,
+            timeoutMs: japaneseDeadlineMs,
+          });
+          recordCheck(pi, "auto", finalText, check);
+        }
+      }
+
+      // 正常 stop の本文だけを手動 check の対象として追跡する。
+      if (message.stopReason === "stop") {
+        const texts = (message.content ?? [])
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text);
+        const joined = texts.join("");
+        if (joined.length > 0) lastFinalText = joined;
+      }
+
       if (result.outcome !== "formatted" || !result.replacement) return undefined;
       const corrected = replaceSingleTextBlock(
         message,
@@ -191,6 +286,41 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
           turnIndex: event.turnIndex,
         });
       }
+    });
+
+    // /quality japanese check: 現在の final response を read-only で検証する。
+    // Advisor / Formatter / Executor を起動せず、過去の保存 message を変更しない。
+    pi.registerCommand("quality", {
+      description: "pi-quality-flow status / japanese check",
+      handler: async (args, ctx) => {
+        if (args.trim() !== "japanese check") {
+          ctx.ui.notify("usage: /quality japanese check", "info");
+          return;
+        }
+        if (!gateExecutable) {
+          ctx.ui.notify("japanese gate is not configured", "warning");
+          return;
+        }
+        // 現在の final response（正常 stop の本文）のみを対象にする。
+        // 非アクティブ branch の履歴は参照しない。
+        const lastText = lastFinalText;
+        if (lastText === undefined) {
+          ctx.ui.notify("no final response to check", "warning");
+          return;
+        }
+        const check = await checkJapanese({
+          text: lastText,
+          executable: gateExecutable,
+          signal: ctx.signal,
+          timeoutMs: japaneseDeadlineMs,
+        });
+        recordCheck(pi, "manual", lastText, check);
+        if (check.ok) {
+          ctx.ui.notify(summarizeCheck(check.check), "info");
+        } else {
+          ctx.ui.notify(`japanese check failed: ${check.code}`, "error");
+        }
+      },
     });
   };
 }

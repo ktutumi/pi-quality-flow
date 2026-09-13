@@ -37,6 +37,8 @@ export interface HarnessOptions {
   responses: MockResponse[];
   /** pi-quality-flow へ注入する finalizer。未指定は fail-closed。 */
   finalize?: Finalizer;
+  /** 固定版 jp-quality-gate の executable（日本語検証の契約試験用）。 */
+  gateExecutable?: string;
   /** 永続 session（保存・resume 試験用）。未指定は in-memory。 */
   persistent?: boolean;
   /** 既存 session file を resume する（保存／resume 契約試験用）。persistent より優先。 */
@@ -56,6 +58,8 @@ export interface Harness {
   /** pi-quality-flow の candidate 記録（session entry から復元）。 */
   candidateEntries: () => Array<Record<string, unknown>>;
   turnMappingEntries: () => Array<Record<string, unknown>>;
+  /** pi-quality-flow の check 記録（session entry から復元）。 */
+  checkEntries: () => Array<Record<string, unknown>>;
   /** mock provider が受けた request 群。 */
   mockState: MockState;
   events: () => Array<{ type: string; [key: string]: unknown }>;
@@ -97,7 +101,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
   };
   const qualityExtension: InlineExtension = {
     name: "pi-quality-flow",
-    factory: createQualityFlowExtension({ finalize: options.finalize }),
+    factory: createQualityFlowExtension({ finalize: options.finalize, gateExecutable: options.gateExecutable }),
     hidden: true,
   };
 
@@ -160,6 +164,8 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
       readEntries().filter((e) => e && typeof e === "object" && "candidateId" in e && "inputHash" in e),
     turnMappingEntries: () =>
       readEntries().filter((e) => e && typeof e === "object" && "candidateId" in e && "turnIndex" in e && !("inputHash" in e)),
+    checkEntries: () =>
+      readEntries().filter((e) => e && typeof e === "object" && "status" in e && "scope" in e),
     mockState,
     events: () => capturedEvents,
     cleanup: async () => {
