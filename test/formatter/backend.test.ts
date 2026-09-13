@@ -345,3 +345,12 @@ test("validateCompletion: 利用不明の usage をゼロにしない", () => {
   assert.equal(result.usage.known, false);
   assert.equal(result.usage.outputTokens, undefined);
 });
+
+test("validateCompletion: token の部分報告も不明として扱う（ゼロにしない）", () => {
+  const message = makeMessage();
+  (message.usage as { input?: number }).input = undefined;
+  const result = validateCompletion(message, 262_144, "m");
+  assert.ok(result.ok);
+  assert.equal(result.usage.known, false);
+  assert.equal(result.usage.outputTokens, undefined);
+});

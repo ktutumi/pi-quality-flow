@@ -125,8 +125,10 @@ export function resolveFormatterModel(
  * 隔離した stateless-api backend（設計書 §19.2 の FormatterBackend 実装）。
  *
  * capability は既定で FORMATTER_CAPABILITIES_UNVERIFIED（すべて false）。
- * 実際の値は packaged の適合記録（docs/compat/formatter-backend.md）から
- * 注入する。実送信試験が完了していない構成では isReady() が false となり、
+ * 実際の値は packaged の適合記録（docs/compat/formatter-backend.md）を読む
+ * loader（extension 側の配線、Issue #8）だけが注入する。テストもこの注入を
+ * 使うが、本番経路でユーザー設定が capability を上書きする経路は存在しない。
+ * 実送信試験が完了していない構成では isReady() が false となり、
  * 自動 Formatter は有効化されない。
  */
 export class StatelessApiBackend {
@@ -248,6 +250,10 @@ export function validateCompletion(
 
 function summarizeUsage(usage: AssistantMessage["usage"]): FormatterUsage {
   if (!usage) return { known: false };
+  // provider が一部だけ報告する場合も不明として扱う（欠損値をゼロにしない）。
+  if (typeof usage.input !== "number" || typeof usage.output !== "number") {
+    return { known: false };
+  }
   return {
     inputTokens: usage.input,
     outputTokens: usage.output,
