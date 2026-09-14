@@ -9,6 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHarness, lastAssistantMessage, APPROVED_FORMATTER_CONFIG } from "../helpers/harness.ts";
 import { GATE_BIN, assertGateBinaryPinned } from "../helpers/gate-bin.ts";
+import { sha256Utf8 } from "../../src/pi/adapter.ts";
 import type { QualityFlowConfigStore } from "../../src/config/store.ts";
 
 const JP_TEXT = "これは简体字のテスト。";
@@ -509,6 +510,53 @@ test("OFF 状態で開始する turn は finalizer を呼ばない（invocation 
     await harness.session.prompt("test");
     assert.equal(started, 0, "OFF の turn では finalizer が呼ばれない");
     assert.equal(lastAssistantMessage(harness.session)?.text, ORIGINAL_FIX);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("steer が finalize 待機中に届いたら置換しない（pending-continuation）", async () => {
+  // advisory の回帰試験: finalize の await 中に steer を投入し、
+  // 採用直前の hasPendingMessages 再検査で pending-continuation になることを
+  // 公開入口（extension wiring）で確認する。
+  let harness: Awaited<ReturnType<typeof createHarness>> | undefined;
+  const harnessPromise = createHarness({
+    responses: [
+      { text: ORIGINAL_FIX },
+      { text: "steer 後の回答です。" },
+    ],
+    gateExecutable: GATE_BIN,
+    finalize: async ({ originalText }) => {
+      // 再入防止: steer 後の応答には steer しない。
+      if (originalText !== ORIGINAL_FIX) return undefined;
+      // finalize 実行中に steer を queue する（abort signal は発火しない）。
+      await harness?.session.steer("別の質問をします");
+      return ADOPTED_FIX;
+    },
+  });
+  harness = await harnessPromise;
+  try {
+    await harness.session.prompt("test");
+    const assistantMessages = harness.session.messages
+      .filter((m) => m.role === "assistant")
+      .map((m) => {
+        const a = m as unknown as { content: Array<{ type: string; text?: string }> };
+        return a.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
+      });
+    assert.equal(assistantMessages.length, 2, "steer により2つの応答");
+    assert.equal(
+      assistantMessages[0],
+      ORIGINAL_FIX,
+      "steer 到着後の遅延結果は適用されない（原文のまま）",
+    );
+    assert.equal(assistantMessages[1], "steer 後の回答です。", "steer への応答は通常処理");
+    const candidates = harness.candidateEntries();
+    const target = candidates.find((c) => c.inputHash === sha256Utf8(ORIGINAL_FIX));
+    assert.ok(target, "対象 candidate の記録がある");
+    assert.equal(target.phase, "skipped", "pending-continuation で skip 記録");
+    assert.equal(target.reason, "pending-continuation");
+    // steer による追加 Executor ターンが発生している（steer 1回分の request）。
+    assert.equal(harness.mockState.requests.length, 2);
   } finally {
     await harness.cleanup();
   }

@@ -92,6 +92,12 @@ export async function finalizeAssistantMessage(input: {
    * 1回だけ実行する（重複 event による複数回 CLI 呼び出しを防ぐ）。
    */
   preGate?: (text: string) => Promise<CheckJapaneseResult>;
+  /**
+   * 待機中 continuation の現在値（各 await 後・採用直前に再検査）。
+   * Pi の steer は abort signal を発火させないため、開始時の snapshot だけでは
+   * 処理中に届いた steer を検出できない（設計書 第33.2章）。
+   */
+  hasPendingMessages?: () => boolean;
 }): Promise<FinalizeResult> {
   const { message, pendingMessages, ledger, finalize, preGate } = input;
   const maxSourceBytes = input.maxSourceBytes ?? MAX_SOURCE_BYTES;
@@ -124,6 +130,12 @@ export async function finalizeAssistantMessage(input: {
   let preGateResult: CheckJapaneseResult | undefined;
   if (preGate) {
     preGateResult = await preGate(eligibility.text);
+    if (input.hasPendingMessages?.()) {
+      // pre gate 実行中に steer / follow-up が届いた。遅延結果を破棄する
+      // （置換を続行すると、steer で修正される前の本文を採用してしまう）。
+      ledger.commit(record, "skipped", "pending-continuation");
+      return { outcome: "skipped", reason: "pending-continuation", candidateId: record.candidateId };
+    }
   }
 
   if (!finalize) {
@@ -141,6 +153,12 @@ export async function finalizeAssistantMessage(input: {
     originalText: eligibility.text,
     preGate: preGateResult,
   });
+  if (input.hasPendingMessages?.()) {
+    // finalize 実行中に steer / follow-up が届いた。採用判断の直前にも再検査する
+    // （有効性確認と反映を同じ直列化区間で行う。設計書 第33.2章）。
+    ledger.commit(record, "skipped", "pending-continuation");
+    return { outcome: "skipped", reason: "pending-continuation", candidateId: record.candidateId };
+  }
   if (adopted === undefined) {
     ledger.commit(record, "unchanged", "no-adoption", inputHash);
     return { outcome: "unchanged", reason: "no-adoption", candidateId: record.candidateId };
@@ -476,6 +494,8 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       const result = await finalizeAssistantMessage({
         message,
         pendingMessages: ctx.hasPendingMessages(),
+        // steer は abort signal を発火させないため、各 await 後に再検査する。
+        hasPendingMessages: () => ctx.hasPendingMessages(),
         ledger,
         maxSourceBytes: snapshot.config.japanese.maxSourceBytes,
         // 採用シーム: mode 表（第13章）に従い、pre gate の後で trigger を評価して
