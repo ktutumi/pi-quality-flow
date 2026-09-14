@@ -103,25 +103,42 @@ export function createStageController(options: {
   external?: AbortSignal;
   /** deadline の監視間隔（ms、既定 10）。テストで短くする。 */
   tickMs?: number;
+  /** deadline 到達で abort したときに呼ぶ（切れた予算の種別を渡す）。 */
+  onExpiry?: (expiry: BudgetExpiry) => void;
+  /** 外部 signal の abort で abort したときに呼ぶ（user cancel）。 */
+  onCancel?: () => void;
 }): StageController {
   const controller = new AbortController();
   // 登録前に既に abort 済みの外部 signal は即時反映する（Escape 後の
   // controller 生成で gate / backend を開始させない）。
   if (options.external?.aborted) {
     controller.abort();
+    options.onCancel?.();
     return {
       signal: controller.signal,
       dispose() {},
     };
   }
   const tickMs = options.tickMs ?? 10;
+  // callback は controller の abort につき 1 回だけ呼ぶ（timer が期限後に
+  // 再び発火しても onExpiry を繰り返さない）。
+  let notified = false;
   const timer = setInterval(() => {
-    if (options.budget.expired(Date.now()) !== undefined) {
+    if (notified) return;
+    const expiry = options.budget.expired(Date.now());
+    if (expiry !== undefined) {
+      notified = true;
+      options.onExpiry?.(expiry);
       controller.abort();
     }
   }, tickMs);
   timer.unref?.();
-  const onExternalAbort = () => controller.abort();
+  const onExternalAbort = () => {
+    if (notified) return;
+    notified = true;
+    options.onCancel?.();
+    controller.abort();
+  };
   options.external?.addEventListener("abort", onExternalAbort, { once: true });
 
   return {

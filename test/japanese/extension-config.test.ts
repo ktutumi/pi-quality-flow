@@ -561,3 +561,86 @@ test("steer が finalize 待機中に届いたら置換しない（pending-conti
     await harness.cleanup();
   }
 });
+
+test("pre gate 実行中の user cancel は cancelled として記録する", async () => {
+  // Escape（session.abort）で ctx.signal が abort する。gate CLI は
+  // signal を受け取るため cancelled を返し、Formatter は開始しない。
+  let harness: Awaited<ReturnType<typeof createHarness>> | undefined;
+  let aborted = false;
+  let finalizeCalls = 0;
+  const harnessPromise = createHarness({
+    responses: [
+      { text: ORIGINAL_FIX, chunkCount: 8, chunkDelayMs: 30 },
+      { text: "（使われない）" },
+    ],
+    gateExecutable: GATE_BIN,
+    onEvent: (event) => {
+      // streaming 完了（text_end）直後に abort を予約する。abort は idle 化を
+      // 待つため、message_end 後の pre gate 実行中に signal が abort 済みになる
+      // （pre-cancel 経路）。
+      if (aborted) return;
+      const e = event as { assistantMessageEvent?: { type?: string } };
+      if (e.assistantMessageEvent?.type === "text_end") {
+        aborted = true;
+        setTimeout(() => void harness?.session.abort(), 0);
+      }
+    },
+    finalize: () => {
+      finalizeCalls++;
+      return ADOPTED_FIX;
+    },
+  });
+  harness = await harnessPromise;
+  try {
+    await harness.session.prompt("test");
+    // abort により応答は aborted になり、candidate 記録は対象外。
+    // formatterReason / cancelled フラグの telemetry を確認する。
+    const checks = harness.checkEntries();
+    assert.equal(checks.length, 1, "pre gate は実行される");
+    assert.ok(checks[0].cancelled === true, "user cancel を entry に記録");
+    assert.equal(finalizeCalls, 0, "cancel 後は finalizer 0回");
+    assert.equal(harness.mockState.requests.length, 1, "Formatter 0回");
+    // ledger / outcome の分類（telemetry だけでは回帰を検出できない）。
+    const candidates = harness.candidateEntries();
+    const target = candidates.find((c) => c.inputHash === sha256Utf8(ORIGINAL_FIX));
+    assert.ok(target, "対象 candidate の記録がある");
+    assert.equal(target.phase, "skipped", "cancel は skipped として記録");
+    assert.equal(target.reason, "cancelled", "cancel 理由コード");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("japanese deadline 到達で pre gate は timeout、Formatter 0回", async () => {
+  // deadlineMs を極端に短くし、japanese 予算の打切りを公開入口で確認する。
+  const harness = await createHarness({
+    responses: [{ text: ORIGINAL_FIX }],
+    gateExecutable: GATE_BIN,
+    globalConfig: {
+      ...APPROVED_FORMATTER_CONFIG,
+      japanese: {
+        ...APPROVED_FORMATTER_CONFIG.japanese,
+        deadlineMs: 1,
+      },
+    },
+    finalize: () => ADOPTED_FIX,
+  });
+  try {
+    await harness.session.prompt("test");
+    const checks = harness.checkEntries();
+    assert.equal(checks.length, 1, "pre gate の失敗を entry に記録");
+    assert.equal(checks[0].status, "skipped", "CLI 失敗は skipped として記録");
+    assert.equal(checks[0].failureCode, "timeout", "deadline 到達は timeout");
+    assert.ok(checks[0].budgetExpiry === "japanese-deadline", "japanese 予算の期限切れを記録");
+    assert.equal(harness.mockState.requests.length, 1, "Formatter 0回（timeout 後の stage なし）");
+    assert.equal(lastAssistantMessage(harness.session)?.text, ORIGINAL_FIX, "原文のまま");
+    // ledger / outcome の分類（telemetry だけでは回帰を検出できない）。
+    const candidates = harness.candidateEntries();
+    const target = candidates.find((c) => c.inputHash === sha256Utf8(ORIGINAL_FIX));
+    assert.ok(target, "対象 candidate の記録がある");
+    assert.equal(target.phase, "failed", "deadline は failed として記録");
+    assert.equal(target.reason, "pre-gate-timeout", "timeout 理由コード");
+  } finally {
+    await harness.cleanup();
+  }
+});

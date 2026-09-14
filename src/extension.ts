@@ -20,6 +20,7 @@ import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { CandidateLedger, type CandidateRecord } from "./coordinator/candidates.ts";
+import { createStageController, StageBudget, type BudgetExpiry } from "./coordinator/budget.ts";
 import { loadQualityFlowConfig, type ResolvedConfig } from "./config/loader.ts";
 import { QualityFlowConfigStore, shouldKeepLastKnownGood, type ConfigSnapshot } from "./config/store.ts";
 import { shouldTriggerFormatter } from "./config/trigger.ts";
@@ -135,6 +136,18 @@ export async function finalizeAssistantMessage(input: {
       // （置換を続行すると、steer で修正される前の本文を採用してしまう）。
       ledger.commit(record, "skipped", "pending-continuation");
       return { outcome: "skipped", reason: "pending-continuation", candidateId: record.candidateId };
+    }
+    // 中断・期限切れは以後の stage（Formatter）を開始しない（設計書 第32.2章）。
+    // user cancel は cancelled、deadline は failed として区別する。
+    if (preGateResult && !preGateResult.ok) {
+      if (preGateResult.code === "cancelled") {
+        ledger.commit(record, "skipped", "cancelled");
+        return { outcome: "cancelled", reason: "pre-gate-cancelled", candidateId: record.candidateId };
+      }
+      if (preGateResult.code === "timeout") {
+        ledger.commit(record, "failed", "pre-gate-timeout");
+        return { outcome: "failed", reason: "pre-gate-timeout", candidateId: record.candidateId };
+      }
     }
   }
 
@@ -462,6 +475,14 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       const decision = autoGateDecision(snapshot);
       const executable = resolveGateExecutable();
 
+      // 全体予算（Issue #7、設計書 第32.1章）: candidate 90秒・日本語処理10秒を
+      // 個別 stage 上限より優先する。日本語処理の予算は編集可能範囲の解析開始
+      // （pre gate 実行）で開始する。
+      const budget = new StageBudget({
+        candidateDeadlineMs: snapshot.config.finalization.deadlineMs,
+        japaneseDeadlineMs: snapshot.config.japanese.deadlineMs,
+      });
+
       // pre gate の結果と trigger 判断（entry 記録用）。
       let preCheck: CheckJapaneseResult | undefined;
       let preGateText: string | undefined;
@@ -470,6 +491,9 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       let triggeredResult: boolean | undefined;
       /** pre gate 完了後の configRevision 再検査結果。 */
       let preGateCurrent = true;
+      /** 期限切れ・中断の区別（Issue #7 AC）。 */
+      let budgetExpiry: BudgetExpiry | undefined;
+      let userCancelled = false;
 
       /** pre gate（原文の検証）。claim 後に 1 回だけ実行される。
        *  各 await 後の有効性検査（Issue #4）: 完了後に設定が変わっていたら
@@ -477,17 +501,61 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       let preGateRunner: ((text: string) => Promise<CheckJapaneseResult>) | undefined;
       if (decision.run && executable) {
         preGateRunner = async (text) => {
-          const check = await checkJapanese({
-            text,
-            executable,
-            timeoutMs: snapshot.config.japanese.deadlineMs,
-            signal: ctx.signal,
+          // ユーザー中断済み（Escape）の turn では stage を開始しない
+          // （設計書 第32.2章: user cancel は pipeline を始めない）。
+          if (ctx.signal?.aborted) {
+            userCancelled = true;
+            const check: CheckJapaneseResult = { ok: false, code: "cancelled" };
+            preCheck = check;
+            preGateText = text;
+            return check;
+          }
+          budget.markJapaneseStart(Date.now());
+          // 予算切れのときは新 stage を開始しない（設計書 第32.1章）。
+          const timeoutMs = budget.stageTimeoutMs(snapshot.config.japanese.gate.timeoutMs, Date.now());
+          if (timeoutMs === undefined) {
+            budgetExpiry = budget.expired(Date.now());
+            const check: CheckJapaneseResult = {
+              ok: false,
+              code: "timeout",
+              message: `budget exhausted (${budgetExpiry})`,
+            };
+            preCheck = check;
+            preGateText = text;
+            return check;
+          }
+          const stage = createStageController({
+            budget,
+            external: ctx.signal,
+            onExpiry: (expiry) => {
+              budgetExpiry = expiry;
+            },
+            onCancel: () => {
+              userCancelled = true;
+            },
           });
-          preCheck = check;
-          preGateText = text;
-          lastCheck = check.ok ? check.check : undefined;
-          if (!store.isCurrent(snapshot.revision)) preGateCurrent = false;
-          return check;
+          try {
+            const check = await checkJapanese({
+              text,
+              executable,
+              timeoutMs,
+              signal: stage.signal,
+            });
+            // 予算切れで stage signal が abort した場合、runGate は signal abort を
+            // cancelled として返す。切れた予算（budgetExpiry）を優先して
+            // timeout に正規化する（設計書 第32.2章: deadline ≠ user cancel）。
+            const normalized: CheckJapaneseResult =
+              budgetExpiry !== undefined && !check.ok && check.code === "cancelled"
+                ? { ok: false, code: "timeout", message: `budget exhausted (${budgetExpiry})` }
+                : check;
+            preCheck = normalized;
+            preGateText = text;
+            lastCheck = normalized.ok ? normalized.check : undefined;
+            if (!store.isCurrent(snapshot.revision)) preGateCurrent = false;
+            return normalized;
+          } finally {
+            stage.dispose();
+          }
         };
       }
 
@@ -564,6 +632,9 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
           extra.triggered = triggeredResult ?? false;
           extra.formatterReason = formatterDecision ?? "formatter-started";
         }
+        // 中断・期限切れの区別を entry に記録する（Issue #7 AC）。
+        if (userCancelled) extra.cancelled = true;
+        if (budgetExpiry !== undefined) extra.budgetExpiry = budgetExpiry;
         recordCheck(pi, "auto", preGateText, preCheck, extra);
       }
 

@@ -15,7 +15,8 @@ export type CandidatePhase =
   | "claimed"
   | "formatted"
   | "unchanged"
-  | "skipped";
+  | "skipped"
+  | "failed";
 
 export interface CandidateRecord {
   candidateId: string;
