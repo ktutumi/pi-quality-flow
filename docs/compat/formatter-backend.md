@@ -83,23 +83,32 @@ Issue #5「隔離した Gemini backend の単発要求を適合確認する」�
 | B16 | 空出力・複数 text block を失敗にする | pass |
 | B17 | thinking があっても text だけを取り出す | pass |
 | B18 | 上限超過の出力は切り詰めず失敗にする | pass |
-| B19 | 利用不明の usage をゼロにしない | pass |
+| B19 | 利用不明・部分報告の usage をゼロにしない | pass |
+| B20 | request 固有の envelope marker を生成し、framing 指示を承認 prompt に付加する | pass |
+| B21 | request ごとに marker が変わる（nonce の使い回しなし） | pass |
+| B22 | envelope 契約に従う出力から本文だけを返す（end-to-end） | pass |
+| B23 | 前置き付き出力は envelope-missing で拒否する（end-to-end） | pass |
+| B24 | 前置き・後置き・囲いなし出力を envelope-missing で拒否する | pass |
+| B25 | 本文内の marker 複製（envelope-duplicate）と別 nonce marker（envelope-unknown-marker）を拒否する | pass |
+| B26 | 上限超過の raw 出力（marker 込み）は切り詰めず失敗にする | pass |
 
-## 未充足の項目（実送信試験とは別の既定経路の欠落）
+## 未充足の項目（実送信試験とは別の既定経路の欠落）→ 解決済み
 
-Issue #5 の AC「部分出力、前置きやレビュー文を正常な修正案と扱わない」のうち、
-**前置き・レビュー文の機械的な拒否機構は本 backend にはない**。現在の出力検査は
-stop reason / 非空単一 text block / toolCall なし / サイズ上限までであり、
-内容の framing 判定はしない。
+Issue #5 の AC「部分出力、前置きやレビュー文を正常な修正案と扱わない」は、
+ADR 0002（docs/adr/0002-formatter-envelope-wire-format.md）の wire format 層
+envelope 契約により解決した。
 
-設計書 §20 の承認 prompt は「修正後の本文だけ。前置き、囲いの追加は禁止」と
-指示するが、指示は制御の補助であり検証を代替しない（同章）。framing を機械検査
-するには出力 envelope（begin/end marker）の導入が必要だが、これは §20 の
-出力契約（囲いの追加は禁止）と整合する設計の再検討を伴うため、Issue #8 の
-承認 prompt・pipeline 実装で決定する。
+- 承認 prompt に request 固有の nonce 付き marker 指示を付加し、backend は
+  marker の byte-exact な存在・位置・個数を検査して内側だけを本文として返す
+- marker の欠落（前置き・後置き・囲いなし）・重複・別 nonce marker の混入は
+  envelope-missing / envelope-duplicate / envelope-unknown-marker として拒否
+- wire format の出力サイズ上限は marker を含む raw 出力に適用する
+- framing は transport 専用であり、採用本文は §20 の「本文だけ」契約を満たす
+  （設計書 §20 に追記済み）
+- model が marker 契約に従えるかは #14 の実送信試験で確認する（従えない場合は
+  ADR 0002 を見直す）
 
-したがって本 backend は実送信試験に加えてこの点でも**未充足**であり、
-両方が解決するまで ready にはならない。
+残る未充足は実送信試験（#14）のみ。
 
 ## 実送信試験で確認すべき項目（未実施）
 

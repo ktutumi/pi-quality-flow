@@ -876,6 +876,8 @@ MVP は `tech-minimal` profile とし、頻度設定の `always` でも修正範
 
 prompt は制御の補助であり、権限・不変条件・意味変更リスクの検証を代替しない。技術レビューは Formatter の前にあるため、Formatter の修正が新たな意味反転を作る可能性を特に保守的に扱う。
 
+**Wire format 層の envelope（ADR 0002 追記）**: backend と model 間の transport では、出力の最初と最後に request 固有の nonce 付き marker（`<<FMT:beg:<nonce>>>` / `<<FMT:end:<nonce>>>`）を要求する。backend は marker の byte-exact な存在・位置・個数を検査し、内側だけを本文として取り出す。marker は採用本文・保存セッション・次ターン context に現れない。上記の「囲いの追加は禁止」は採用本文に対する契約として不変であり、marker は本文への囲いの追加ではなく transport フレームとして扱う。marker 契約に model が従えない場合は ADR 0002 を見直す（#14 の実送信試験で確認する）。
+
 ---
 
 ## 21. Protected Span

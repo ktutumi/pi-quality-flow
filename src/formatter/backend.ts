@@ -22,6 +22,7 @@ import type {
   Context,
   Model,
 } from "@earendil-works/pi-ai";
+import { createEnvelope, envelopeInstruction, extractEnvelope, type Envelope } from "./envelope.ts";
 
 /** backend が申告する capability（設計書 §19.2）。 */
 export interface FormatterBackendCapabilities {
@@ -55,6 +56,9 @@ export type FormatterFailureCode =
   | "stop-reason-unknown"
   | "no-text-output"
   | "multi-text-blocks"
+  | "envelope-missing"
+  | "envelope-duplicate"
+  | "envelope-unknown-marker"
   | "output-too-large";
 
 export type FormatterResult =
@@ -163,8 +167,10 @@ export class StatelessApiBackend {
       return { ok: false, code: "aborted" };
     }
 
+    // request 固有の envelope（ADR 0002）。framing 指示を承認 prompt に付加する。
+    const envelope = createEnvelope();
     const context: Context = {
-      systemPrompt: request.systemPrompt,
+      systemPrompt: `${request.systemPrompt}${envelopeInstruction(envelope)}`,
       messages: [
         {
           role: "user",
@@ -192,20 +198,29 @@ export class StatelessApiBackend {
       message,
       request.maxOutputBytes,
       `${resolved.model.provider}/${resolved.model.id}`,
+      envelope,
     );
   }
 }
 
 /**
  * 完了 message の検査（副作用のない純粋関数）。
- * 正常 stop、非空 text、toolCall なし、完全な出力、サイズ上限を確認する。
- * length / toolUse / error / aborted、空出力、複数 text block、
- * 上限超過（切り詰め）はいずれも失敗とする。
+ *
+ * 検査順（ADR 0002）:
+ * 1. stop reason（stop 以外は失敗）
+ * 2. toolCall block の混在（stop でも拒否）
+ * 3. 非空・単一 text block
+ * 4. raw 出力（marker を含む）のサイズ上限
+ * 5. envelope 検査と本文取り出し（前置き・レビュー文・囲い・部分出力の拒否）
+ *
+ * 返す text は envelope の内側だけ（採用本文候補）。marker は含まない
+ * （framing は transport 専用、採用本文は §20 の「本文だけ」契約を満たす）。
  */
 export function validateCompletion(
   message: AssistantMessage,
   maxOutputBytes: number,
   modelLabel: string,
+  envelope: Envelope,
 ): FormatterResult {
   const usage = summarizeUsage(message.usage);
   switch (message.stopReason) {
@@ -241,11 +256,14 @@ export function validateCompletion(
   }
   if (textBlocks.length === 0) return { ok: false, code: "no-text-output" };
   if (textBlocks.length > 1) return { ok: false, code: "multi-text-blocks" };
-  const text = textBlocks[0].text;
-  if (Buffer.byteLength(text, "utf8") > maxOutputBytes) {
+  const raw = textBlocks[0].text;
+  // wire format の上限は marker を含む raw 出力に適用する（ADR 0002）。
+  if (Buffer.byteLength(raw, "utf8") > maxOutputBytes) {
     return { ok: false, code: "output-too-large" };
   }
-  return { ok: true, text, usage, model: modelLabel };
+  const extracted = extractEnvelope(raw, envelope);
+  if (!extracted.ok) return { ok: false, code: extracted.code };
+  return { ok: true, text: extracted.body, usage, model: modelLabel };
 }
 
 function summarizeUsage(usage: AssistantMessage["usage"]): FormatterUsage {
