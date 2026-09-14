@@ -441,6 +441,8 @@ test("validateCompletion: 本文内の marker 複製と別 nonce marker を拒�
   assert.deepEqual(failureOf(unknown), { ok: false, code: "envelope-unknown-marker" });
 });
 
+test.todo("frame 内側のレビュー文は #8 の pipeline invariant で拒否する（#5 は transport 層に限定、ADR 0003）");
+
 test("validateCompletion: 上限超過の raw 出力（marker 込み）は切り詰めず失敗にする", () => {
   const env = createEnvelope();
   const longBody = "あ".repeat(200);

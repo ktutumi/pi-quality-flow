@@ -19,6 +19,8 @@ Formatter backend の **wire format**（model → backend 間の transport 層�
 
 **採用本文の契約は変わらない。** envelope は transport 専用であり、backend が取り出した本文（採用候補）は §20 の「修正後の本文だけ。囲いの追加は禁止」契約を満たす。marker は採用本文・保存セッション・次ターン context に現れない。
 
+**保証の範囲**: envelope は出力の完全性と境界（前置き・後置き・部分出力・marker 重複・別 nonce 混入）を保証する。marker の内側に書かれたレビュー文までは backend 層では検出できない。この残差は pipeline invariant（#8）と実送信試験での実測（#14）と組み合わせて扱う。単体では部分保証である。
+
 §20 の「囲いの追加は禁止」は採用本文に対する契約として維持する。wire format 層の marker は本文への囲いの追加ではなく、model が本文を包む transport フレームとして扱う。この区別を設計書 §20 に追記する。
 
 ## 影響

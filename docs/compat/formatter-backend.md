@@ -92,23 +92,33 @@ Issue #5「隔離した Gemini backend の単発要求を適合確認する」�
 | B25 | 本文内の marker 複製（envelope-duplicate）と別 nonce marker（envelope-unknown-marker）を拒否する | pass |
 | B26 | 上限超過の raw 出力（marker 込み）は切り詰めず失敗にする | pass |
 
-## 未充足の項目（実送信試験とは別の既定経路の欠落）→ 解決済み
+## AC「前置き・レビュー文を正常な修正案と扱わない」の達成範囲（ADR 0003）
 
-Issue #5 の AC「部分出力、前置きやレビュー文を正常な修正案と扱わない」は、
-ADR 0002（docs/adr/0002-formatter-envelope-wire-format.md）の wire format 層
-envelope 契約により解決した。
+Issue #5 の同 AC は **transport 層（framing）の検証に限定する**（ADR 0003、
+docs/adr/0003-transport-level-validation-scope.md）。backend が保証するもの:
 
-- 承認 prompt に request 固有の nonce 付き marker 指示を付加し、backend は
-  marker の byte-exact な存在・位置・個数を検査して内側だけを本文として返す
-- marker の欠落（前置き・後置き・囲いなし）・重複・別 nonce marker の混入は
-  envelope-missing / envelope-duplicate / envelope-unknown-marker として拒否
-- wire format の出力サイズ上限は marker を含む raw 出力に適用する
-- framing は transport 専用であり、採用本文は §20 の「本文だけ」契約を満たす
-  （設計書 §20 に追記済み）
-- model が marker 契約に従えるかは #14 の実送信試験で確認する（従えない場合は
-  ADR 0002 を見直す）
+- 出力の完全性: marker の欠落（前置き・後置き・囲いなし出力・部分出力）の拒否
+- 境界の正しさ: marker の byte-exact な位置・個数、別 request の marker 混入の拒否
+- サイズ上限: marker を含む raw 出力への適用
 
-残る未充足は実送信試験（#14）のみ。
+backend が保証しないもの（#8 の pipeline invariant の管轄）:
+
+- **marker の内側に書かれたレビュー文・前置きの検出**（内容の判定）
+- 保護領域・Markdown 構造・意味リスク・採用判断
+
+内側のレビュー文（例: `${begin}修正案です：修正しました。…${end}`）は
+backend 層では検出できない。framing は境界の証明であり、内側の内容の証明ではない。
+完全な拒否は #8 の pipeline invariant（採用判断が修正案の本文を原文と
+保護領域・構造で照合し、変更を編集可能 segment の tech-minimal 範囲に限定）で
+達成する。#8 はこの形態（文頭追加・途中挿入）を明示的な要件として扱う。
+
+文頭一致検査（body-prefix-mismatch）等の backend 層 heuristic は、
+文頭の誤字修正（tech-minimal の中核ケース）を誤拒否し、unchanged prefix 後の
+挿入を見逃すため ADR 0003 初版で検討したが撤回した。
+
+model が marker 契約そのものに従えない（内側にレビュー文を書く）頻度は
+#14 の実送信試験で実測し、頻発する場合は ADR 0002 の見直し（出力契約の
+再設計または pipeline 側の追加 invariant）を検討する。
 
 ## 実送信試験で確認すべき項目（未実施）
 

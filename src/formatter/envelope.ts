@@ -87,7 +87,7 @@ export function extractEnvelope(raw: string, envelope: Envelope): EnvelopeExtrac
   }
   if (occurrences > 2) {
     // begin/end の位置は既に確認済みなので、3個目以降は本文中の marker。
-    // それが同一 nonce か別 nonce かで分類する。
+    // 同一 nonce か別 nonce かで分類する。
     if (body.includes(envelope.begin) || body.includes(envelope.end)) {
       return { ok: false, code: "envelope-duplicate" };
     }
