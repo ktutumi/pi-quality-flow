@@ -108,9 +108,14 @@ backend が保証しないもの（#8 の pipeline invariant の管轄）:
 
 内側のレビュー文（例: `${begin}修正案です：修正しました。…${end}`）は
 backend 層では検出できない。framing は境界の証明であり、内側の内容の証明ではない。
-完全な拒否は #8 の pipeline invariant（採用判断が修正案の本文を原文と
-保護領域・構造で照合し、変更を編集可能 segment の tech-minimal 範囲に限定）で
-達成する。#8 はこの形態（文頭追加・途中挿入）を明示的な要件として扱う。
+完全な拒否は #8 の pipeline invariant で達成する。ただし既存の構造検査
+（Markdown block 種別・個数・順序）と保護 span の byte 列一致だけでは
+**既存段落内へのレビュー文挿入は捕捉できない**（段落内の挿入は Markdown 構造を
+変えず、保護 span にも触れない）。#8 には、編集可能 segment 内のテキスト差分を
+扱う内容レベルの差分 rule（変更量上限、挿入位置・形態の判定）を新規に設計し、
+レビュー文の fixture（文頭追加・段落内挿入）で検証することを受け入れ要件として
+記録済み（issue comment、2026-09-14）。既存の構造・保護 span 検査がこの要件を
+保証すると前提しないこと。
 
 文頭一致検査（body-prefix-mismatch）等の backend 層 heuristic は、
 文頭の誤字修正（tech-minimal の中核ケース）を誤拒否し、unchanged prefix 後の
