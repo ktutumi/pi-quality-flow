@@ -4,10 +4,12 @@
  * - candidateId は session epoch / run / turn / sequence から決める。本文 hash からは作らない
  * - 本文が A → B に置換されても同じ回答候補（同一 candidateId）
  * - 同じ本文でも新 turn / 新 snapshot なら別の回答候補
- * - 台帳は session 切替で無効化する（上限付き; 詳細な retention は Issue #7）
- *
- * 設計: docs/pi-quality-flow-design-v0.2.md 第8章。
+ * - 台帳は上限付き（既定 128、turn_end で対応付け済みの記録から破棄。Issue #7）
+ * 設計: docs/pi-quality-flow-design-v0.2.md 第8章、第33.3章。
  */
+
+/** 台帳の既定上限。turn_end 対応待ちの記録を優先して保持する。 */
+export const DEFAULT_LEDGER_LIMIT = 128;
 
 export type CandidatePhase =
   | "claimed"
@@ -47,6 +49,9 @@ export class CandidateLedger {
   private readonly candidates = new Map<string, CandidateRecord>();
   /** 置換後も同一視できるよう、pre-replacement の message オブジェクトを candidate に束縛する。 */
   private readonly messageToId = new WeakMap<CandidateMessageRef, string>();
+  /** turn_end 対応付けが完了した candidateId（破棄候補の優先順位用）。 */
+  private readonly mappedIds = new Set<string>();
+  private readonly limit: number;
   private epoch = "";
   private runIndex = 0;
   private turnIndex = 0;
@@ -54,11 +59,16 @@ export class CandidateLedger {
   /** session epoch の通し番号（同一 session id の再読み込みでも進む）。 */
   private epochGeneration = 0;
 
+  constructor(limit: number = DEFAULT_LEDGER_LIMIT) {
+    this.limit = Math.max(1, limit);
+  }
+
   /** session_start / session 切替で呼ぶ。旧 session の candidate をすべて無効化する。 */
   beginSession(sessionId: string): void {
     this.epochGeneration += 1;
     this.epoch = `${sessionId || "no-session"}#${this.epochGeneration}`;
     this.candidates.clear();
+    this.mappedIds.clear();
     this.runIndex = 0;
     this.turnIndex = 0;
     this.candidateSequence = 0;
@@ -123,13 +133,32 @@ export class CandidateLedger {
     this.candidates.set(candidateId, record);
     this.messageToId.set(input.message, candidateId);
     this.candidateSequence += 1;
+    this.evict();
     return { ok: true, record };
   }
 
   /** message オブジェクトから candidate を引く（turn_end の対応付け用。claim しない）。 */
   resolveByMessage(message: CandidateMessageRef): CandidateRecord | undefined {
     const candidateId = this.messageToId.get(message);
-    return candidateId ? this.candidates.get(candidateId) : undefined;
+    const record = candidateId ? this.candidates.get(candidateId) : undefined;
+    if (!candidateId || !record) return undefined;
+    this.mappedIds.add(candidateId);
+    this.evict();
+    return record;
+  }
+
+  /**
+   * 上限超過時の eviction。turn_end 対応済みの記録だけを破棄する（第33.3章）。
+   * 未対応の記録は terminal event の関連付けに必要なため、上限を一時的に
+   * 超えても保持する（対応付けが完了した時点で破棄する）。
+   */
+  private evict(): void {
+    for (const id of this.mappedIds) {
+      if (this.candidates.size <= this.limit) break;
+      if (!this.candidates.has(id)) continue;
+      this.candidates.delete(id);
+      this.mappedIds.delete(id);
+    }
   }
 
   /** 置換実行前に session epoch が変わっていないか検査する。 */
