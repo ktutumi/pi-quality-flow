@@ -19,21 +19,20 @@ backend が保証するもの（ADR 0002 の envelope 契約）:
 - 出力の完全性: marker の欠落（前置き・後置き・囲いなし出力・部分出力）の拒否
 - 境界の正しさ: marker の byte-exact な位置・個数、別 request の marker 混入の拒否
 - サイズ上限: marker を含む raw 出力への適用
-- 本文の独立 marker 検査: 取り出した本文に `<<FMT:` prefix が現れれば拒否（envelope-marker-in-body）。これは framing 構造の一部であり、#8 との重複ではない
 
 backend が保証しないもの（#8 の pipeline invariant の管轄）:
 
 - marker の内側に書かれたレビュー文・前置きの検出（内容の判定）
 - 保護領域・Markdown 構造・意味リスク・採用判断（decideAdoption の決定表）
 
-**前置き・レビュー文の完全な拒否は #8 の pipeline invariant で達成する**。pipeline は採用判断の一部として、修正案の本文が原文と保護領域・構造を共有し、変更が編集可能 segment の tech-minimal 範囲に留まることを検査する。その検査は文頭追加・文途中挿入・削除のすべての形態を構造差分として扱えるため、backend 層の heuristic より正確である。
+**前置き・レビュー文の完全な拒否は #8 の pipeline invariant で達成する**。pipeline は採用判断の一部として、修正案の本文を原文と照合する。ただし既存の構造検査（Markdown block 種別・個数・順序）と保護 span の byte 列一致は段落内の挿入を捕捉できない（Markdown 構造を変えず、保護 span にも触れないため）。レビュー文の検出には、編集可能 segment 内のテキスト差分を扱う**内容レベルの差分 rule（変更量上限、挿入位置・形態の判定）の新規設計と、レビュー文の fixture（文頭追加・段落内挿入）による検証が必要である。
 
 この narrow により、#5 は transport 契約の実装と検証で完了できる。#8 には、編集可能 segment 内のテキスト差分を扱う**内容レベルの差分 rule（変更量上限、挿入位置・形態の判定）を新規に設計し、レビュー文の fixture（文頭追加・段落内挿入）で検証する**ことを受け入れ要件として記録した。既存の構造検査（Markdown block 種別・個数・順序）と保護 span の byte 列一致は段落内の挿入を捕捉できない（Markdown 構造を変えず、保護 span にも触れないため）。既存検査がこの要件を保証すると前提しないこと。
 
 ## 影響
 
-- `src/formatter/backend.ts`: `envelope-marker-in-body` の検査を追加する（framing 構造の一部）。`validateCompletion` に原文を渡す変更はしない。
+- `src/formatter/backend.ts`: 変更なし。本文中の marker prefix は既存の envelope 検査（`extractEnvelope` の marker prefix 出現数チェック）で拒否済みであり、別途の post-extraction 検査は到達不能な重複になるため追加しない。
 - Issue #5 の本文: 該当 AC を transport 層の文言に更新する。
 - docs/compat/formatter-backend.md: 保証範囲の記録を更新する。
-- Issue #8: pipeline invariant の要件に「レビュー文の形態を構造差分で捕捉する」を追記する。
+- Issue #8: pipeline invariant の受け入れ要件として「内容レベルの差分 rule の新規設計とレビュー文 fixture による検証」を記録する（既存の構造・保護 span 検査が要件を保証すると前提しない）。
 - ADR 0003 初版は撤回（本 ADR に統合）。
