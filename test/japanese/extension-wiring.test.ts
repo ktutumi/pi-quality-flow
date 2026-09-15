@@ -104,3 +104,58 @@ test("/quality japanese check: 最後の assistant message を read-only 検証�
     await harness.cleanup();
   }
 });
+
+test("手動 check と自動検証の競合: 手動 check は自動処理の candidate を claim しない", async () => {
+  // 手動 check は read-only 検証であり、自動検証（candidate claim / single-flight）
+  // と干渉しないことを確認する。auto gate が candidate を claim した後でも
+  // 手動 check は同じ本文を独立に検証できる。
+  const harness = await createHarness({
+    responses: [{ text: "これは简体字のテスト。" }],
+    gateExecutable: GATE_BIN,
+  });
+  try {
+    await harness.session.prompt("test");
+    const autoChecks = harness.checkEntries().filter((c) => c.source === "auto");
+    assert.equal(autoChecks.length, 1, "自動 gate の check 記録");
+    // 手動 check を実行する。
+    await harness.session.prompt("/quality japanese check");
+    const checks = harness.checkEntries();
+    const manual = checks.filter((c) => c.source === "manual");
+    assert.equal(manual.length, 1, "手動 check は独立に記録される");
+    assert.equal(manual[0]?.status, "fail");
+    // モデル要求は増えない（手動 check は Formatter / Executor を起動しない）。
+    assert.equal(harness.mockState.requests.length, 1);
+    // 手動 check で candidate 記録は増えない（claim を取らない）。
+    assert.equal(harness.candidateEntries().length, autoChecks.length, "candidate 記録は変化しない");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("手動 check と自動検証の遅延競合: 自動処理の結果は手動 check で壊れない", async () => {
+  // 手動 check 中に自動処理が完了しても、lastCheck / entry の上書きで
+  // 両方の記録が保持されることを確認する。
+  const harness = await createHarness({
+    responses: [{ text: "これは简体字のテストです。" }],
+    gateExecutable: GATE_BIN,
+    finalize: ({ originalText }) =>
+      originalText === "これは简体字のテストです。" ? "これは簡体字のテストです。" : undefined,
+  });
+  try {
+    await harness.session.prompt("test");
+    const autoBefore = harness.checkEntries().filter((c) => c.source === "auto").length;
+    assert.equal(autoBefore, 1, "自動 gate の記録");
+    // 置換後の採用本文を手動 check する。
+    await harness.session.prompt("/quality japanese check");
+    const checks = harness.checkEntries();
+    assert.equal(checks.filter((c) => c.source === "auto").length, autoBefore, "自動記録は保持");
+    assert.equal(checks.filter((c) => c.source === "manual").length, 1, "手動記録は保持");
+    const manual = checks.find((c) => c.source === "manual");
+    assert.ok(manual);
+    // 採用本文（簡体字）は error 0 になる。
+    assert.equal(manual.status, "pass", "採用本文の check は pass");
+    assert.equal(harness.mockState.requests.length, 1, "モデル要求は増えない");
+  } finally {
+    await harness.cleanup();
+  }
+});
