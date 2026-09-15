@@ -619,6 +619,14 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         isConfigCurrent: (revision) => store.isCurrent(revision),
       });
 
+      // 処理中に設定が変わっていた（OFF / mode 変更 / reload / last-known-good）
+      // 場合は旧 snapshot に基づく状態更新を一切行わない（第33.3章: stale 結果は
+      // 新しい session / config の状態を上書きしない）。candidate 記録より先に
+      // 検査する（stale-config でも candidate entry は書かない）。
+      if (!store.isCurrent(snapshot.revision)) {
+        return undefined;
+      }
+
       if (result.candidateId) {
         const record = ledger.find(result.candidateId);
         if (record) appendCandidateEntry(pi, record);

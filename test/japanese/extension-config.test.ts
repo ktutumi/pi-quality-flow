@@ -485,9 +485,21 @@ test("OFF は採用処理も停止する（OFF 前に始まった修正は後か
     assert.equal(started, 1, "finalizer は呼ばれたが");
     assert.equal(lastAssistantMessage(harness.session)?.text, ORIGINAL_FIX, "OFF 中に始まった処理の結果は適用されない");
     const candidates = harness.candidateEntries();
-    const latest = candidates[candidates.length - 1];
-    assert.ok(latest);
-    assert.notEqual(latest?.phase, "formatted", "formatted として記録されない");
+    // stale 結果は新 config の状態を上書きしない（第33.3章）: candidate entry
+    // も check entry も 0 件（stale-config は記録を書かない）。
+    assert.equal(candidates.length, 0, "stale-config では candidate entry を書かない");
+    assert.equal(harness.checkEntries().length, 0, "stale-config では check entry を書かない");
+    // lastFinalText も更新されないため、stale turn 後の手動 check は対象なし。
+    await harness.session.prompt("/quality japanese check");
+    const notifies = harness.typedEntries("pi-quality-flow:notify");
+    assert.ok(
+      notifies.some((n) => String(n.message).includes("no final response to check")),
+      "stale turn は手動 check 対象を更新しない",
+    );
+    const manualChecks = harness.typedEntries("pi-quality-flow:check").filter(
+      (c) => c.source === "manual",
+    );
+    assert.equal(manualChecks.length, 0, "手動 check entry も発生しない");
   } finally {
     await harness.cleanup();
   }
