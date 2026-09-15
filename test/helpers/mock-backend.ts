@@ -44,6 +44,11 @@ export function createMockBackend(options: {
   };
 }
 
+/** テキスト中の a と b を入れ替える（token / chunk の順序変更 fixture 用）。 */
+export function swapInText(text: string, a: string, b: string): string {
+  return text.replace(a, "\u0000").replace(b, a).replace("\u0000", b);
+}
+
 /**
  * request 本文（sentinel + 編集可能 segment）の中で、segment 内の
  * from → to 置換を適用する。sentinel token 内でないことを検査する。

@@ -293,6 +293,18 @@ export async function finalizeAssistantMessage(input: {
     ledger.commit(record, "skipped", "stale-config");
     return { outcome: "stale", reason: "stale-config", candidateId: record.candidateId };
   }
+  // 反映直前にも対象条件を再確認する（設計書 第6章: 必須条件は置換直前に
+  // 再確認）。同一 message オブジェクト内の block 構成が変わっていないことを
+  // 検査し、変化があれば置換しない。
+  const reflected = isEligibleTerminalCandidate(message, maxSourceBytes);
+  if (
+    !reflected.ok ||
+    reflected.textIndex !== eligibility.textIndex ||
+    reflected.text !== eligibility.text
+  ) {
+    ledger.commit(record, "skipped", "eligibility-changed");
+    return { outcome: "skipped", reason: "eligibility-changed", candidateId: record.candidateId };
+  }
 
   const outputHash = sha256Utf8(adopted);
   ledger.commit(record, "formatted", "formatter-adopted", outputHash);
@@ -727,6 +739,14 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
                   executable,
                   config: snapshot.config.japanese,
                   checkJapaneseFn: checkJapaneseFn,
+                  // model request の開始直前に試行を記録する（第18章）。
+                  // 障害・拒否も回数に含めるため、開始事実を別 entry に残す。
+                  onRequestStart: (candidateId) => {
+                    pi.appendEntry("pi-quality-flow:formatter-attempt", {
+                      candidateId,
+                      configRevision: snapshot.revision,
+                    });
+                  },
                 },
               );
               formatterRun = pipelineResult.run;
@@ -898,8 +918,17 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
           inputHash: candidateRecord?.inputHash,
           outputHash: candidateRecord?.outputHash,
           outcome: result.outcome,
+          scope: "editable-prose",
           profile: TECH_MINIMAL_PROFILE_VERSION,
+          configRevision: snapshot.revision,
         });
+      }
+
+      // 障害通知は既定 ON（設計書 第25章）。本文は通知に含めない。
+      if (result.outcome === "failed" && snapshot.config.ui.notifyOnFailure) {
+        const message = `quality-flow: japanese formatter failed (reason=${result.reason}, original kept)`;
+        ctx.ui.notify(message, "error");
+        pi.appendEntry("pi-quality-flow:notify", { message, level: "error" });
       }
 
       // 正常 stop の本文だけを手動 check の対象として追跡する。

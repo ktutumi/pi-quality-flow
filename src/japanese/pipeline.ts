@@ -23,7 +23,7 @@ import { prepareEditableDocument } from "./editable-document.ts";
 import { buildProtectedRequest, verifyAndRestore } from "./sentinel.ts";
 import { verifySemanticRisk } from "./semantic-risk.ts";
 import { verifyRestoredStructure } from "./structural.ts";
-import { checkJapanese, type GateCheck, type CheckJapaneseResult } from "./service.ts";
+import { checkJapanese, type GateCheck } from "./service.ts";
 
 /** backend が満たすべき最小の形（StatelessApiBackend と構造的に適合）。 */
 export interface FormatterBackendLike {
@@ -49,6 +49,11 @@ export interface FormatterPipelineContext {
   config: JapaneseConfig;
   /** テスト注入用。省略時は本物の checkJapanese。 */
   checkJapaneseFn?: typeof checkJapanese;
+  /**
+   * model request の開始直前に呼ぶ（設計書 第18章: Formatter attempt は
+   * request を開始する前に記録する）。実 backend request が出ることだけを
+   * 記録するため、request 前打ち切りの誤記録を防ぐ。 */
+  onRequestStart?: (candidateId: string) => void;
 }
 
 export type FormatterPipelineResult =
@@ -69,7 +74,10 @@ export interface FormatterRunRecord {
   candidateId: string;
   /** model request を開始したか（障害・拒否も回数に含める）。 */
   requested: boolean;
+  /** Formatter backend の障害 code（成功時・gate 障害時は undefined）。 */
   backendCode?: string;
+  /** post gate CLI の障害 code（stage 障害のときのみ）。 */
+  postGateCode?: string;
   model?: string;
   usage?: FormatterUsage;
   /** request 本文の UTF-8 byte 長（sentinel を含む）。 */
@@ -141,6 +149,8 @@ export async function runFormatterPipeline(
   }
 
   // Formatter request（回答候補あたり最大1回。失敗でも再要求しない）。
+  // 試行は request の開始直前に記録する（第18章）。
+  context.onRequestStart?.(candidateId);
   const rewrite = await context.backend.rewrite({
     systemPrompt: TECH_MINIMAL_PROMPT,
     text: protectedRequest.request.text,
@@ -210,13 +220,21 @@ export async function runFormatterPipeline(
     timeoutMs: postTimeoutMs,
     signal,
   });
-  const postCheck = post.ok
-    ? { status: post.check.status, score: { ...post.check.score } }
-    : undefined;
+  if (!post.ok) {
+    // CLI 障害（timeout / 不正 JSON / exit 矛盾等）は stage 障害。
+    // 原文維持・post 再実行なし・後続処理なし（第26.3章）。中断は
+    // signal 経由で再分類される（deadline / cancelled）。
+    return {
+      ok: false,
+      code: `post-gate-${post.code}`,
+      run: finishRun({ ...requested, postGateCode: post.code }),
+    };
+  }
+  const postCheck = { status: post.check.status, score: { ...post.check.score } };
   const decision = decideAdoption({
     pre: input.preGate,
-    post: post.ok ? post.check : undefined,
-    gateUnusable: postGateUnusable(post, input.preGate),
+    post: post.check,
+    gateUnusable: postGateUnusable(post.check),
     invalidated: signal?.aborted ? "cancelled" : undefined,
     config: context.config.adoption,
   });
@@ -242,17 +260,11 @@ function postGateTimeoutMs(
   return Math.min(gateLimitMs, remaining);
 }
 
-/** post gate の結果が pre と比較できる状態か（第17.1章 第4行）。 */
-function postGateUnusable(
-  post: CheckJapaneseResult,
-  pre: GateCheck,
-): string | undefined {
-  if (!post.ok) {
-    // 中断は signal 経由で再分類される（deadline / cancelled）。
-    return post.code === "cancelled" ? undefined : `post-gate-failed:${post.code}`;
-  }
-  if (post.check.status === "skipped") return `post-skipped:${post.check.reason ?? "unknown"}`;
-  if (post.check.incomplete !== undefined) return post.check.incomplete;
-  if (pre.binaryVersion !== post.check.binaryVersion) return "binary-version-mismatch";
+/** post gate の結果が pre と比較できる状態か（第17.1章 第4行）。
+ *  CLI の process 障害は呼び出し側で stage 障害に分類済み。
+ *  incomplete / binaryVersion / scope / policyDigest は decideAdoption の
+ *  第4行で検査するため、ここでは skipped だけを判定する。 */
+function postGateUnusable(post: GateCheck): string | undefined {
+  if (post.status === "skipped") return `post-skipped:${post.reason ?? "unknown"}`;
   return undefined;
 }

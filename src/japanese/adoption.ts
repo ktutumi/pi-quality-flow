@@ -14,7 +14,7 @@
  */
 import type { AdoptionConfig } from "../config/schema.ts";
 import type { GateCheck } from "./service.ts";
-import { compareScores, isScoreRegression, type GateScore } from "../jpqg/score.ts";
+import { compareScores, isScoreRegression } from "../jpqg/score.ts";
 
 /** 決定表の評価に必要な入力（すべての検査の結果を渡す）。 */
 export interface AdoptionInputs {
@@ -157,6 +157,3 @@ export function findNewDiagnostics(
 function identityKey(diagnostic: DiagnosticIdentity): string {
   return `${diagnostic.ruleId}\u0000${diagnostic.segmentId}\u0000${diagnostic.severity}\u0000${diagnostic.issueKey}`;
 }
-
-/** スコア比較の再輸出（pipeline から使う）。 */
-export { compareScores, isScoreRegression, type GateScore };

@@ -375,3 +375,23 @@ test("gate projection: 同一 block 内の inline 分割 segment は連結され
   const projection = buildGateProjection(doc);
   assert.equal(projection.projection, "これは重要です。");
 });
+
+
+test("識別子・API / package 名の保護と通常英語語の非保護", () => {
+  const spansOf = (text: string): string[] => {
+    const doc = prepareEditableDocument(text);
+    assert.ok(doc.supported);
+    return doc.protectedSpans.map((span) => span.text);
+  };
+  // token 内に大文字を2個以上含む語（API / SDK / IPv6）と camelCase・snake_case を保護
+  assert.deepEqual(spansOf("API の返却値を使います。"), ["API"]);
+  assert.deepEqual(spansOf("SDK を更新します。"), ["SDK"]);
+  assert.deepEqual(spansOf("IPv6 で接続します。"), ["IPv6"]);
+  assert.deepEqual(spansOf("maxTokens を設定します。"), ["maxTokens"]);
+  assert.deepEqual(spansOf("max_tokens を設定します。"), ["max_tokens"]);
+  // 通常の英語語（先頭大文字のみ・全小文字）は編集可能のまま
+  assert.deepEqual(
+    spansOf("Hello, this is a normal sentence with Important words."),
+    [],
+  );
+});

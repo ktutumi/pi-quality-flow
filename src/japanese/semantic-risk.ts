@@ -11,7 +11,7 @@
  * - 危険信号: 否定・条件・比較・因果・必須／任意・確信度のトークンが
  *   削除側と挿入側で一致しない変更を拒否する
  * - 助詞変更: 助詞（単体・複合）だけからなる変更 region を
- *   許可パターン導入（Issue #9）まで拒否する
+ *   許可助詞パターン導入（Issue #9）まで拒否する
  * - レビュー文・前置き: 挿入側のマーカー語・敬体接尾辞・sentinel 断片を拒否する
  *   （文頭追加・段落内挿入の fixture で検証する）
  *
@@ -161,44 +161,47 @@ export function splitSentences(text: string): string[] {
 }
 
 /**
- * 助詞変更の検査（Issue #9 の許可パターン導入まで拒否）。
+ * 助詞変更の検査（Issue #9 の許可助詞パターン導入まで拒否）。
  *
- * 1. 単体・複合助詞のみからなる kana run の一致（純助詞の挿入・削除・置換）。
- *    主体・対象を変えない一般語（例: 「もの」「ました」「しますた」）は一致しない。
- * 2. 削除側と挿入側の先頭 kana run が異なる核助詞ではじまる組
- *    （例: 「がい」→「をみ」）。助詞と語句の同時置換による主体/対象の反転を検出する。
+ * 1. 削除側・挿入側の kana run が助詞（単体・複合）と一致する出入り。
+ *    主体・対象を変えない一般語（例: 「もの」「まし」）は一致しない。
+ * 2. 両側が kana のみの変更で、片側が 2 code points 以上の組
+ *    （例: 「さえ」→「すら」、「がい」→「をみ」、「ほど」→「くらい」）。
+ *    助詞・語句の同時置換を含む kana 変更を包括的に拒否する。
+ *    助詞でないかな語の修正は 1 文字交換（例: 「しますた」→「しました」）の
+ *    形をとるため許可される。
  */
 const PARTICLES = new Set([
-  "は", "が", "を", "に", "で", "と", "も", "へ", "の", "や", "か", "ね", "よ", "な", "わ", "け",
-  "ほど", "くらい", "ぐらい", "ごろ", "ころ",
+  "は", "が", "を", "に", "で", "と", "も", "へ", "の", "や", "か", "ね", "よ", "な", "わ", "け", "ば",
+  "ぞ", "ぜ", "かな", "かしら", "やら", "なり", "つつ", "ながら", "ものの",
+  "ほど", "くらい", "ぐらい", "ごろ", "ころ", "さえ", "すら", "だけ", "しか", "こそ", "って",
   "から", "まで", "より", "って", "には", "では", "への", "との", "での", "ので",
   "のに", "のは", "のが", "のを", "のも", "にも", "でも", "とも", "とは",
-  "など", "しか", "こそ", "けど", "のみ", "ばかり", "けれど",
+  "など", "なんて", "だの", "とか", "けど", "のみ", "ばかり", "けれど", "けれども",
+  "について", "にとって", "に対して", "によって", "により", "に関して", "を通じて", "において",
 ]);
-
-/** 主体・対象を反転させ得る核助詞（run 先頭での比較に使う）。 */
-const CORE_PARTICLE_CHARS = "がをはにでの";
+// 単体の「さ」は文末助詞にも語の一部（くだい→ください 等）にもなり、
+// 文脈なしでは区別できないため、この集合には入れない（既知の限界）。
 
 function kanaRuns(text: string): string[] {
   return text.match(/[ぁ-ゖ]+/g) ?? [];
 }
 
-/** 先頭が核助詞ではじまる kana run（2 code points 以上）の先頭助詞。 */
-function leadingCoreParticle(text: string): string | undefined {
-  const run = text.match(/^[ぁ-ゖ]+/)?.[0];
-  if (run === undefined || [...run].length < 2) return undefined;
-  const first = [...run][0];
-  return CORE_PARTICLE_CHARS.includes(first) ? first : undefined;
+function isKanaOnly(text: string): boolean {
+  return /^[ぁ-ゖ]*$/.test(text);
+}
+
+function kanaLength(text: string): number {
+  return [...text].length;
 }
 
 export function hasParticleChange(del: string, ins: string): boolean {
-  // 純助詞の run（例: 「が」「のは」「ほど」）の出入り。
+  // 純助詞の run（例: 「が」「のは」「ほど」「さえ」）の出入り。
   if (kanaRuns(del).some((run) => PARTICLES.has(run))) return true;
   if (kanaRuns(ins).some((run) => PARTICLES.has(run))) return true;
-  // 助詞と語句の同時置換（例: 「がい」→「をみ」）: 両側の先頭核助詞が異なるなら反転。
-  const delLead = leadingCoreParticle(del);
-  const insLead = leadingCoreParticle(ins);
-  if (delLead !== undefined && insLead !== undefined && delLead !== insLead) {
+  // kana のみの両側変更で片側 2 code points 以上なら助詞・語の変更として拒否
+  // （かなの単一文字入れ替えは誤字修正として許可する）。
+  if (isKanaOnly(del) && isKanaOnly(ins) && (kanaLength(del) >= 2 || kanaLength(ins) >= 2)) {
     return true;
   }
   return false;
@@ -343,7 +346,7 @@ function checkRegionChange(region: ChangeRegion):
   const limit = checkChangeLimit(region);
   if (!limit.ok) return { ok: false, code: "change-limit-exceeded", detail: limit.detail };
 
-  // 助詞変更（Issue #9 の許可パターン導入まで拒否）。
+  // 助詞変更（Issue #9 の許可助詞パターン導入まで拒否）。
   if (hasParticleChange(region.del, region.ins)) {
     return { ok: false, code: "particle-change", detail: `${region.del}→${region.ins}` };
   }

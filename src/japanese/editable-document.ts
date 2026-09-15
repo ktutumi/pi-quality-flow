@@ -56,9 +56,19 @@ export const MDAST_PARSE_OPTIONS: Options = PARSE_OPTIONS;
 
 /** 編集可能 prose とする node 型（子を走査する container）。 */
 const EDITABLE_CONTAINERS = new Set([
-  "root", "paragraph", "heading", "emphasis", "strong", "delete",
-  "listItem", "tableCell", "link", "linkReference",
-  "table", "tableRow", "list",
+  "root",
+  "paragraph",
+  "heading",
+  "emphasis",
+  "strong",
+  "delete",
+  "listItem",
+  "tableCell",
+  "link",
+  "linkReference",
+  "table",
+  "tableRow",
+  "list",
 ]);
 
 /** 編集可能な leaf。 */
@@ -66,23 +76,49 @@ const EDITABLE_LEAF = "text";
 
 /** 保護する leaf node 型。 */
 const PROTECTED_LEAVES = new Set([
-  "inlineCode", "code", "image", "break", "thematicBreak",
-  "footnoteReference", "html", "footnoteDefinition", "definition", "yaml",
+  "inlineCode",
+  "code",
+  "image",
+  "break",
+  "thematicBreak",
+  "footnoteReference",
+  "html",
+  "footnoteDefinition",
+  "definition",
+  "yaml",
 ]);
 
 /** 確認済み HTML code / pre のみ保護する（設計書 21.1）。 */
 const SAFE_HTML = /^<(code|pre)(\s[^>]*)?>[\s\S]*<\/\1>$/i;
 
 /** 「…」 / 『…』 の pair。 */
-const QUOTE_PAIRS: Array<[string, string]> = [["「", "」"], ["『", "』"]];
+const QUOTE_PAIRS: Array<[string, string]> = [
+  ["「", "」"],
+  ["『", "』"],
+];
 
-/** text leaf 内の保護対象（URL / path / version / flag / 数値+単位）。 */
-const INLINE_PROTECTED_PATTERNS: RegExp[] = [
-  /https?:\/\/[^\s<>()「」『』、。]+/gu,
-  /\/?[a-zA-Z0-9._-]*(?:\/[a-zA-Z0-9._-]+)+/gu,
-  /\d+\.\d+(?:\.\d+)?/gu,
-  /--?[a-zA-Z][a-zA-Z0-9-]*/gu,
-  /\d+(?:\.\d+)?(?:%|秒|分|時間|日|週|ヶ月|年|KiB|MiB|GiB|bytes?)/gu,
+/** text leaf 内の保護対象（URL / path / version / flag / 数値+単位 / 識別子）。 */
+type InlineProtection = {
+  pattern: RegExp;
+  filter?: (token: string) => boolean;
+};
+const INLINE_PROTECTED_PATTERNS: InlineProtection[] = [
+  { pattern: /https?:\/\/[^\s<>()「」『』、。]+/gu },
+  { pattern: /\/?[a-zA-Z0-9._-]*(?:\/[a-zA-Z0-9._-]+)+/gu },
+  { pattern: /\d+\.\d+(?:\.\d+)?/gu },
+  { pattern: /--?[a-zA-Z][a-zA-Z0-9-]*/gu },
+  {
+    pattern: /\d+(?:\.\d+)?(?:%|秒|分|時間|日|週|ヶ月|年|KiB|MiB|GiB|bytes?)/gu,
+  },
+  // 識別子 / API / package 名（設計書 21.1）:
+  // - token 内に大文字を2個以上含む語（API / SDK / JSON / IPv6 等）
+  // - camelCase（maxTokens 等・小文字の後に大文字）と snake_case（max_tokens 等）
+  // 通常の英語語（先頭大文字のみ・全小文字）は保護しない。
+  {
+    pattern: /[a-zA-Z0-9_-]+/gu,
+    filter: (token: string) => (token.match(/[A-Z]/g)?.length ?? 0) >= 2,
+  },
+  { pattern: /[a-z]+(?:[A-Z][a-z0-9]+)+|[a-zA-Z0-9_]*_[a-zA-Z0-9_]+/gu },
 ];
 
 /**
@@ -116,7 +152,18 @@ export function prepareEditableDocument(text: string): EditableDocument {
   }
 
   const blockCounter = { next: 0 };
-  if (!visit(root, text, protectedRanges, segments, 0, bomOffset, blockCounter.next++, blockCounter)) {
+  if (
+    !visit(
+      root,
+      text,
+      protectedRanges,
+      segments,
+      0,
+      bomOffset,
+      blockCounter.next++,
+      blockCounter,
+    )
+  ) {
     return { supported: false, reason: "unsupported-structure" };
   }
 
@@ -128,7 +175,12 @@ export function prepareEditableDocument(text: string): EditableDocument {
     text: text.slice(r.start, r.end),
   }));
   const finalSegments = subtractSegments(segments, protectedSpans);
-  return { supported: true, source: text, segments: finalSegments, protectedSpans };
+  return {
+    supported: true,
+    source: text,
+    segments: finalSegments,
+    protectedSpans,
+  };
 }
 
 type Range = { start: number; end: number };
@@ -171,23 +223,45 @@ function visit(
   }
 
   if (node.type === EDITABLE_LEAF) {
-    return extractTextProtections(start, end, text, protectedRanges, segments, blockId);
+    return extractTextProtections(
+      start,
+      end,
+      text,
+      protectedRanges,
+      segments,
+      blockId,
+    );
   }
 
   if (EDITABLE_CONTAINERS.has(node.type)) {
     if (node.type === "link" || node.type === "linkReference") {
       // prose label（子 text）は編集可能、構文部分（括弧・destination）は保護。
-      return visitLink(node, text, protectedRanges, segments, depth, bomOffset, blockId, blockCounter);
+      return visitLink(
+        node,
+        text,
+        protectedRanges,
+        segments,
+        depth,
+        bomOffset,
+        blockId,
+        blockCounter,
+      );
     }
     // block-level container かどうか: 子を新しい block として走査するか。
     // paragraph / heading / tableCell / emphasis / strong / delete は
     // inline content の親（同一 blockId 維持）。
     // root / list / table / listItem は子 block を分ける。
     const INLINE_PARENT = new Set([
-      "paragraph", "heading", "tableCell", "emphasis", "strong", "delete",
+      "paragraph",
+      "heading",
+      "tableCell",
+      "emphasis",
+      "strong",
+      "delete",
     ]);
     const childBlockId = INLINE_PARENT.has(node.type) ? blockId : -1;
-    const children = (node as { children?: RootContent[] | PhrasingContent[] }).children ?? [];
+    const children =
+      (node as { children?: RootContent[] | PhrasingContent[] }).children ?? [];
     for (let i = 0; i < children.length; i++) {
       const child = children[i]!;
       // inline の <code>…</code> / <pre>…</pre> は html + text + html に分解
@@ -196,13 +270,25 @@ function visit(
         // 開始・終了タグを1つの node に含む block level の code/pre。
         if (SAFE_HTML.test(child.value ?? "")) {
           const pos = child.position;
-          if (!pos || pos.start.offset === undefined || pos.end.offset === undefined) return false;
-          protectedRanges.push({ start: pos.start.offset + bomOffset, end: pos.end.offset + bomOffset });
+          if (
+            !pos ||
+            pos.start.offset === undefined ||
+            pos.end.offset === undefined
+          )
+            return false;
+          protectedRanges.push({
+            start: pos.start.offset + bomOffset,
+            end: pos.end.offset + bomOffset,
+          });
           continue;
         }
         const openMatch = /^<(code|pre)(\s[^>]*)?>/i.exec(child.value ?? "");
         if (openMatch) {
-          const closeEnd = findClosingHtmlTag(children, i, openMatch[1]!.toLowerCase());
+          const closeEnd = findClosingHtmlTag(
+            children,
+            i,
+            openMatch[1]!.toLowerCase(),
+          );
           if (closeEnd === undefined) return false;
           const closePos = children[closeEnd]!.position;
           if (!closePos || closePos.end.offset === undefined) return false;
@@ -220,8 +306,21 @@ function visit(
         // 孤立した終了タグは unsupported。
         return false;
       }
-      const nextBlockId = childBlockId === -1 ? blockCounter.next++ : childBlockId;
-      if (!visit(child, text, protectedRanges, segments, depth + 1, bomOffset, nextBlockId, blockCounter)) return false;
+      const nextBlockId =
+        childBlockId === -1 ? blockCounter.next++ : childBlockId;
+      if (
+        !visit(
+          child,
+          text,
+          protectedRanges,
+          segments,
+          depth + 1,
+          bomOffset,
+          nextBlockId,
+          blockCounter,
+        )
+      )
+        return false;
     }
     return true;
   }
@@ -241,21 +340,35 @@ function visitLink(
   blockCounter: { next: number },
 ): boolean {
   const pos = node.position;
-  if (!pos || pos.start.offset === undefined || pos.end.offset === undefined) return false;
+  if (!pos || pos.start.offset === undefined || pos.end.offset === undefined)
+    return false;
   const nodeStart = pos.start.offset + bomOffset;
   const nodeEnd = pos.end.offset + bomOffset;
 
   // prose label 部分（子 node の範囲）だけを編集可能として走査する。
   const children = node.children ?? [];
   for (const child of children) {
-    if (!visit(child, text, protectedRanges, segments, depth + 1, bomOffset, blockId, blockCounter)) return false;
+    if (
+      !visit(
+        child,
+        text,
+        protectedRanges,
+        segments,
+        depth + 1,
+        bomOffset,
+        blockId,
+        blockCounter,
+      )
+    )
+      return false;
   }
 
   // 構文部分（label 外）を保護 range 化する。
   const childRanges: Array<[number, number]> = [];
   for (const child of children) {
     const p = child.position;
-    if (!p || p.start.offset === undefined || p.end.offset === undefined) return false;
+    if (!p || p.start.offset === undefined || p.end.offset === undefined)
+      return false;
     childRanges.push([p.start.offset + bomOffset, p.end.offset + bomOffset]);
   }
   childRanges.sort((a, b) => a[0] - b[0]);
@@ -311,10 +424,11 @@ function extractTextProtections(
     }
   }
 
-  // URL / path / version / flag / 数値+単位 の保護。
-  for (const pattern of INLINE_PROTECTED_PATTERNS) {
+  // URL / path / version / flag / 数値+単位 / 識別子 の保護。
+  for (const { pattern, filter } of INLINE_PROTECTED_PATTERNS) {
     pattern.lastIndex = 0;
     for (const match of raw.matchAll(pattern)) {
+      if (filter && !filter(match[0])) continue;
       const ms = start + (match.index ?? 0);
       protectedRanges.push({ start: ms, end: ms + match[0].length });
     }
@@ -357,9 +471,13 @@ function findClosingHtmlTag(
     const child = children[i]!;
     if (child.type !== "html") continue;
     const value = (child.value ?? "").trim().toLowerCase();
-    if (value === `</${lower}>` || new RegExp(`^</${lower}\\s+$`).test(value)) return i;
+    if (value === `</${lower}>` || new RegExp(`^</${lower}\\s+$`).test(value))
+      return i;
     // 入れ子の同種タグは未対応として扱う（fail-closed は呼び出し側）。
-    if (value.startsWith(`<${lower}`) && (value === `<${lower}>` || value.startsWith(`<${lower} `))) {
+    if (
+      value.startsWith(`<${lower}`) &&
+      (value === `<${lower}>` || value.startsWith(`<${lower} `))
+    ) {
       return undefined;
     }
   }
@@ -423,12 +541,15 @@ export interface GateProjection {
    * projection 全体の code point [start, end) を原文 UTF-16 [start, end) へ変換する。
    * 単一 segment に完全に含まれない場合は undefined（対応不能）。
    */
-  mapDiagnostic: (startCp: number, endCp: number) =>
-    | { segmentId: string; start: number; end: number }
-    | undefined;
+  mapDiagnostic: (
+    startCp: number,
+    endCp: number,
+  ) => { segmentId: string; start: number; end: number } | undefined;
 }
 
-export function buildGateProjection(doc: Extract<EditableDocument, { supported: true }>): GateProjection {
+export function buildGateProjection(
+  doc: Extract<EditableDocument, { supported: true }>,
+): GateProjection {
   // 中立区切り: 空行。block 境界の segment 間だけ空行を入れ、同一 block 内の
   // inline 構文（strong / emphasis / link label 等）で分かれた segment は
   // 連結する（検査文脈を壊さない。設計書 12.2 の gate projection）。
@@ -464,9 +585,12 @@ export function buildGateProjection(doc: Extract<EditableDocument, { supported: 
     projection,
     segments,
     mapDiagnostic: (startCp, endCp) => {
-      if (!Number.isInteger(startCp) || !Number.isInteger(endCp)) return undefined;
+      if (!Number.isInteger(startCp) || !Number.isInteger(endCp))
+        return undefined;
       if (startCp < 0 || endCp <= startCp) return undefined;
-      const seg = segments.find((s) => startCp >= s.projectionStartCp && endCp <= s.projectionEndCp);
+      const seg = segments.find(
+        (s) => startCp >= s.projectionStartCp && endCp <= s.projectionEndCp,
+      );
       if (!seg) return undefined;
       const text = sourceSegments[Number(seg.segmentId.slice(1))]!.text;
       const localStart = startCp - seg.projectionStartCp;
@@ -503,15 +627,30 @@ function subtractSegments(
   const result: EditableSegment[] = [];
   for (const segment of segments) {
     let cursor = segment.start;
-    const overlaps = protectedRanges.filter((r) => r.end > cursor && r.start < segment.end);
+    const overlaps = protectedRanges.filter(
+      (r) => r.end > cursor && r.start < segment.end,
+    );
     for (const r of overlaps) {
       if (r.start > cursor) {
-        result.push({ start: cursor, end: r.start, text: segment.text.slice(cursor - segment.start, r.start - segment.start), blockId: segment.blockId });
+        result.push({
+          start: cursor,
+          end: r.start,
+          text: segment.text.slice(
+            cursor - segment.start,
+            r.start - segment.start,
+          ),
+          blockId: segment.blockId,
+        });
       }
       cursor = Math.max(cursor, r.end);
     }
     if (cursor < segment.end) {
-      result.push({ start: cursor, end: segment.end, text: segment.text.slice(cursor - segment.start), blockId: segment.blockId });
+      result.push({
+        start: cursor,
+        end: segment.end,
+        text: segment.text.slice(cursor - segment.start),
+        blockId: segment.blockId,
+      });
     }
   }
   return result;

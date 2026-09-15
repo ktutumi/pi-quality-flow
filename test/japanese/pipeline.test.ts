@@ -21,6 +21,7 @@ import {
   correctInRequest,
   formatterFailure,
   formatterOk,
+  swapInText,
   type MockBackendState,
 } from "../helpers/mock-backend.ts";
 import { SENTINEL_PREFIX } from "../../src/japanese/sentinel.ts";
@@ -69,14 +70,10 @@ function stripSentinels(requestText: string): string {
   return requestText.replace(new RegExp(`${SENTINEL_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[0-9a-f]+_\\d+⟧`, "g"), "");
 }
 
-/** request 本文内の2つの部分を入れ替える（segment chunk 入れ替えの fixture）。 */
-function swapInRequest(requestText: string, a: string, b: string): string {
-  return requestText.replace(a, "\u0000").replace(b, a).replace("\u0000", b);
-}
-
 interface RunEntry {
   requested?: boolean;
   backendCode?: string;
+  postGateCode?: string;
   decision?: { reason?: string; verification?: string; remainingIssues?: boolean };
   usage?: { known?: boolean; inputTokens?: number };
   inputHash?: string;
@@ -264,7 +261,7 @@ test("backend 障害（length）は post 0回・原文維持・failed 記録", a
   }
 });
 
-test("post gate 障害は原文維持（gate-unusable）", async () => {
+test("post gate の CLI 障害は stage 障害として原文維持（failed）", async () => {
   const { harness } = await runPipelineHarness({
     gate: {
       [ORIGINAL]: PASS,
@@ -276,7 +273,42 @@ test("post gate 障害は原文維持（gate-unusable）", async () => {
     await harness.session.prompt("test");
     assert.equal(lastAssistantMessage(harness.session)?.text, ORIGINAL, "post 障害は原文維持");
     const run = runsOf(harness)[0];
-    assert.equal(run.decision?.reason, "gate-unusable:post-gate-failed:timeout");
+    assert.equal(run.outcome, "failed", "CLI 障害は stage 障害（第26.3章）");
+    assert.equal(run.postGateCode, "timeout", "gate 障害 code は別 field に記録");
+    assert.equal(run.backendCode, undefined, "backendCode は backend 専用");
+    const target = harness
+      .candidateEntries()
+      .find((c) => c.inputHash === sha256Utf8(ORIGINAL));
+    assert.equal(target?.phase, "failed");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("post gate の診断不完全は gate-unusable で原文維持（unchanged）", async () => {
+  const { harness } = await runPipelineHarness({
+    gate: {
+      [ORIGINAL]: PASS,
+      [FIX]: {
+        ok: true,
+        check: {
+          status: "pass",
+          scope: "editable-prose",
+          diagnostics: [],
+          score: { errors: 0, warnings: 0 },
+          binaryVersion: VERSION,
+          policyDigest: "test-policy/tech-minimal-v1",
+          incomplete: "gate-diagnostics-incomplete",
+        },
+      } as CheckJapaneseResult,
+    },
+    backendRewrite: formatterOkFix,
+  });
+  try {
+    await harness.session.prompt("test");
+    assert.equal(lastAssistantMessage(harness.session)?.text, ORIGINAL);
+    const run = runsOf(harness)[0];
+    assert.equal(run.decision?.reason, "gate-unusable:gate-diagnostics-incomplete");
     assert.equal(run.decision?.verification, "pre");
     assert.equal(run.outcome, "unchanged");
   } finally {
@@ -369,7 +401,7 @@ test("segment chunk の入れ替えは拒否する（所属構造の変化）", 
   const { harness } = await runPipelineHarness({
     gate: { [ORIGINAL]: PASS },
     backendRewrite: (request) =>
-      formatterOk(swapInRequest(request.text, "この実装方案では、", " の返却値を直接利用します。")),
+      formatterOk(swapInText(request.text, "この実装方案では、", " の返却値を直接利用します。")),
   });
   try {
     await harness.session.prompt("test");

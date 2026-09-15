@@ -15,6 +15,7 @@ import {
   SENTINEL_PREFIX,
 } from "../../src/japanese/sentinel.ts";
 import { prepareEditableDocument } from "../../src/japanese/editable-document.ts";
+import { swapInText } from "../helpers/mock-backend.ts";
 
 const MAX_BYTES = 131072;
 
@@ -129,7 +130,7 @@ test("sentinel の欠落・重複・未知 token・順序変更・改変を拒�
 
   // 順序変更: token を入れ替える（2 token 以上の fixture）。
   if (built.tokens.length >= 2) {
-    const swapped = swapTokens(built.text, built.tokens[0], built.tokens[1]);
+    const swapped = swapInText(built.text, built.tokens[0], built.tokens[1]);
     assertMatch(verifyAndRestore(swapped, request), "sentinel-out-of-order");
   }
 
@@ -144,10 +145,6 @@ function assertMatch(
 ): void {
   assert.equal(actual.ok, false, `拒否されるべき: ${JSON.stringify(actual)}`);
   assert.equal(actual.code, expected);
-}
-
-function swapTokens(text: string, a: string, b: string): string {
-  return text.replace(a, "\u0000").replace(b, a).replace("\u0000", b);
 }
 
 test("verifyAndRestore は token の出現位置だけを見て map から復元する", () => {

@@ -3,7 +3,7 @@
  *
  * 評価例（fixture）は profile tech-minimal-v1 の許容・拒否の境界を固定する:
  * - 否定・条件・比較・因果・必須／任意・確信度の変更を拒否
- * - 助詞変更（許可パターン導入前）を拒否
+ * - 助詞変更（許可助詞パターン導入前）を拒否
  * - 文・段落の追加削除、広範な変更を拒否
  * - レビュー文の挿入（文頭追加・段落内挿入の fixture）を拒否
  * - 明らかな誤字・文字混入の局所修正は許可
@@ -62,14 +62,14 @@ test("必須／任意・確信度・比較の変更を拒否する", () => {
   expectReject("場合のみ実行します。", "条件を満たすと実行します。", "risk-word-change");
   // 同じ token が両側にあれば許可（token の移動でない置換）
   expectAllow("必須の確認しまzす。", "必須の確認します。");
-  // 助詞の挿入（欠落補い）も許可パターン未登録のため拒否する
+  // 助詞の挿入（欠落補い）も許可助詞パターン未登録のため拒否する
   expectReject("このため実行します。", "このために実行します。", "particle-change");
 });
 
-test("主体・対象を反転させる助詞変更を拒否する（許可パターン導入前）", () => {
+test("主体・対象を反転させる助詞変更を拒否する（許可助詞パターン導入前）", () => {
   expectReject("A が B を削除します。", "A を B が削除します。", "particle-change");
   expectReject("設定の変更です。", "設定を変更です。", "particle-change");
-  // 助詞の重複削除（のの → の）も許可パターン未登録のため拒否
+  // 助詞の重複削除（のの → の）も許可助詞パターン未登録のため拒否
   expectReject("設定のの変更です。", "設定の変更です。", "particle-change");
 });
 
@@ -186,18 +186,32 @@ test("splitSentences は文末記号と改行で分割する", () => {
   assert.deepEqual(splitSentences("行1\n行2\n"), ["行1\n", "行2\n"]);
 });
 
-test("hasParticleChange は純助詞 run と核助詞の先頭ペアを検出する", () => {
+test("hasParticleChange は純助詞 run と kana-both 変更を検出する", () => {
   assert.equal(hasParticleChange("が", ""), true);
   assert.equal(hasParticleChange("", "のは"), true);
   assert.equal(hasParticleChange("ほど", "くらい"), true);
-  assert.equal(hasParticleChange("ました", "しました"), false);
-  assert.equal(hasParticleChange("など", ""), true);
-  assert.equal(hasParticleChange("もの", ""), false);
-  // 助詞と語句の同時置換（主体・対象の反転）: 先頭核助詞が異なる組
+  assert.equal(hasParticleChange("さえ", "すら"), true);
   assert.equal(hasParticleChange("がい", "をみ"), true);
-  // 同じ核助詞のままの変更は助詞変更として扱わない
-  assert.equal(hasParticleChange("がい", "がなる"), false);
-  assert.equal(hasParticleChange("まし", "しまし"), false);
+  // kana のみの両側変更で片側 2 文字以上は助詞・語の変更として拒否
+  assert.equal(hasParticleChange("まし", "しまし"), true);
+  assert.equal(hasParticleChange("もの", ""), true);
+  assert.equal(hasParticleChange("ました", "しまし"), true);
+  // kana の単一文字交換（誤字修正の形）は許可する
+  assert.equal(hasParticleChange("す", "しまし".slice(0, 1)), false);
+  assert.equal(hasParticleChange("ら", "し"), false);
+});
+
+test("未列挙の助詞ペア（さえ→すら・ぞ→ぜ）も kana-both rule で拒否する", () => {
+  expectReject("実行さえできます。", "実行すらできます。", "particle-change");
+  expectReject("確実に終わるぞ。", "確実に終わるぜ。", "particle-change");
+  // ラベル付き前置き（確認:・3文字・marker 一覧外）は文頭ルールで拒否
+  expectReject("本文です。", "確認:本文です。", "commentary-inserted");
+});
+
+test("単体の「さ」は文脈なしでは助詞と判定しない（語中の さ 挿入を許可）", () => {
+  // はっく → はっさく（さ は語の一部）は誤字修正として許可する
+  expectAllow("はっくの収穫です。", "はっさくの収穫です。");
+  assert.equal(hasParticleChange("", "さ"), false);
 });
 
 test("profile version は固定値として公開する", () => {
