@@ -51,6 +51,9 @@ const PARSE_OPTIONS: Options = {
   mdastExtensions: [gfmFromMarkdown()],
 };
 
+/** 構造 fingerprint など、同じ parse 結果を必要とする検査と共有する。 */
+export const MDAST_PARSE_OPTIONS: Options = PARSE_OPTIONS;
+
 /** 編集可能 prose とする node 型（子を走査する container）。 */
 const EDITABLE_CONTAINERS = new Set([
   "root", "paragraph", "heading", "emphasis", "strong", "delete",
