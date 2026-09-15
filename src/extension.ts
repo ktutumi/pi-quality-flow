@@ -1,5 +1,5 @@
 /**
- * pi-quality-flow Extension（Phase 0A + 設定/command、Issue #4）。
+ * pi-quality-flow Extension（Phase 0A〜1、Issue #4/#7/#8）。
  *
  * 現在の範囲:
  * - terminal candidate の識別（正常 stop / 非空 text block 1つ / toolCall なし / 8 KiB 以内）
@@ -8,12 +8,15 @@
  * - queued continuation が観測できる場合は置換を開始しない
  * - 設定 schema v2 の解決（defaults → global → trusted project）と configRevision
  * - /quality command 群（status / doctor / on / off / japanese / debug）
- * - mode 表に従う自動 validation-only gate（Formatter backend は Issue #5 以降）
+ * - mode 表に従う pre gate（validation-only）と trigger 評価
+ * - Issue #8: backend 注入時は Formatter pipeline（sentinel 保護 → 復元 →
+ *   構造/意味リスク検査 → post gate → decideAdoption）を採用シームとして配線し、
+ *   provenance（本文とは別記録）を session entry に残す
  *
- * 実モデルによる自動修正は Phase 1 の適合試験が完了するまで有効化しない
- * （egress deny・空 allowlist・未適合 backend ではローカル検証のみ）。
+ * 実モデルによる自動修正は、backend の適合記録（docs/compat/formatter-backend.md）
+ * が検証済みになるまで有効化しない（`backend-not-verified` で fail-closed）。
  *
- * 設計: docs/pi-quality-flow-design-v0.2.md 第6・11・13・27・29章。
+ * 設計: docs/pi-quality-flow-design-v0.2.md 第6・11・12・13・17・23・27・29・32・33章。
  */
 import { isAbsolute } from "node:path";
 import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
@@ -32,6 +35,12 @@ import {
   sha256Utf8,
 } from "./pi/adapter.ts";
 import { checkJapanese, type CheckJapaneseResult, type GateCheck } from "./japanese/service.ts";
+import {
+  runFormatterPipeline,
+  type FormatterBackendLike,
+  type FormatterRunRecord,
+} from "./japanese/pipeline.ts";
+import { TECH_MINIMAL_PROFILE_VERSION } from "./japanese/semantic-risk.ts";
 
 /** Phase 0A〜0B の採用シーム。採用本文を返す。undefined は原文維持。 */
 export type Finalizer = (input: {
@@ -49,11 +58,44 @@ export type Finalizer = (input: {
   signal?: AbortSignal;
   /** signal と同じ予算計算に基づく stage 許可時間（ms）。 */
   timeoutMs?: number;
-}) => string | undefined | Promise<string | undefined>;
+}) => FinalizerResult | Promise<FinalizerResult>;
+
+/** 採用シームの返り値。文字列は採用本文、undefined は原文維持。 */
+export type FinalizerResult =
+  | string
+  | undefined
+  | {
+      /** 採用本文。undefined は原文維持（拒否・無変更）。 */
+      text?: string;
+      /**
+       * stage 障害（backend / post gate / 中断）。原文維持で outcome failed に
+       * 分類する。障害なしの場合は省略する。
+       */
+      failed?: { code: string; message?: string };
+    };
+
+/** Finalizer の返り値を（採用本文、stage 障害）に正規化する。 */
+function normalizeFinalizerResult(
+  returned: FinalizerResult,
+): { adopted: string | undefined; failed: { code: string; message?: string } | undefined } {
+  if (typeof returned === "string") return { adopted: returned, failed: undefined };
+  if (returned && typeof returned === "object") {
+    return { adopted: returned.text, failed: returned.failed };
+  }
+  return { adopted: undefined, failed: undefined };
+}
 
 export interface QualityFlowOptions {
-  /** 省略時は fail-closed: どの candidate も置換しない。 */
+  /**
+   * 採用シーム（テスト注入用）。省略時は backend から pipeline を組む。
+   * 両者とも未指定は fail-closed: どの candidate も置換しない。
+   */
   finalize?: Finalizer;
+  /**
+   * 隔離した Formatter backend（Issue #8）。省略時はローカル検証のみ
+   * （自動 Formatter は無効）。実 model による backend の配線は #14。
+   */
+  backend?: FormatterBackendLike;
   /**
    * 固定版 jp-quality-gate の検証済み executable。
    * 省略時は設定の japanese.gate.command（絶対パスのみ）を使う。
@@ -199,12 +241,15 @@ export async function finalizeAssistantMessage(input: {
   };
 
   let adopted: string | undefined;
+  let stageFailure: { code: string; message?: string } | undefined;
   try {
-    adopted = await finalize({
+    const normalized = normalizeFinalizerResult(await finalize({
       candidateId: record.candidateId,
       originalText: eligibility.text,
       preGate: preGateResult,
-    });
+    }));
+    adopted = normalized.adopted;
+    stageFailure = normalized.failed;
   } catch (error) {
     // signal abort による seam の reject（AbortError 等）も分類対象。
     // 中断・期限切れなら遅延結果を破棄し、candidate に終了記録を付ける。
@@ -220,6 +265,15 @@ export async function finalizeAssistantMessage(input: {
     // （有効性確認と反映を同じ直列化区間で行う。設計書 第33.2章）。
     ledger.commit(record, "skipped", "pending-continuation");
     return { outcome: "skipped", reason: "pending-continuation", candidateId: record.candidateId };
+  }
+  if (stageFailure) {
+    // stage 障害（backend / post gate）。原文維持、以後の処理なし（第26.3章）。
+    ledger.commit(record, "failed", `formatter-stage:${stageFailure.code}`);
+    return {
+      outcome: "failed",
+      reason: `formatter-stage:${stageFailure.code}`,
+      candidateId: record.candidateId,
+    };
   }
   if (adopted === undefined) {
     ledger.commit(record, "unchanged", "no-adoption", inputHash);
@@ -241,10 +295,10 @@ export async function finalizeAssistantMessage(input: {
   }
 
   const outputHash = sha256Utf8(adopted);
-  ledger.commit(record, "formatted", "test-finalizer-adopted", outputHash);
+  ledger.commit(record, "formatted", "formatter-adopted", outputHash);
   return {
     outcome: "formatted",
-    reason: "test-finalizer-adopted",
+    reason: "formatter-adopted",
     candidateId: record.candidateId,
     replacement: { textIndex: eligibility.textIndex, text: adopted },
   };
@@ -266,7 +320,7 @@ function appendCandidateEntry(pi: ExtensionAPI, record: CandidateRecord): void {
 }
 
 export function createQualityFlowExtension(options: QualityFlowOptions = {}): ExtensionFactory {
-  const { finalize, gateExecutable, configStoreHook } = options;
+  const { finalize: seamFinalize, backend, gateExecutable, configStoreHook } = options;
   const checkJapaneseFn = options.checkJapaneseFn ?? checkJapanese;
   const store = new QualityFlowConfigStore();
   /** session_start 時の解決結果（status / doctor の表示用）。 */
@@ -317,6 +371,10 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
     if (jp.mode === "off") return { allowed: false, reason: "mode-off" };
     if (jp.formatter.backend !== "stateless-api") {
       return { allowed: false, reason: "backend-unavailable" };
+    }
+    if (backend !== undefined && !backend.isReady()) {
+      // 適合記録が未検証の backend は自動有効化しない（第51章・docs/compat）。
+      return { allowed: false, reason: "backend-not-verified" };
     }
     if (cfg.security.cloudEgress !== "allow") {
       return { allowed: false, reason: "egress-denied" };
@@ -645,6 +703,43 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         };
       }
 
+      /** pipeline 実行の provenance（stale 検査を通ったときだけ entry に記録する）。 */
+      let formatterRun: FormatterRunRecord | undefined;
+      /** Formatter 実体: 注入 seam を優先し、なければ backend から pipeline を組む。 */
+      const finalizeImpl: Finalizer | undefined =
+        seamFinalize ??
+        (backend && executable
+          ? async (seamInput) => {
+              if (!seamInput.preGate?.ok) {
+                // wrapper の契約上到達しない（pre gate 不合格では呼ばれない）。fail-closed。
+                return undefined;
+              }
+              const pipelineResult = await runFormatterPipeline(
+                {
+                  candidateId: seamInput.candidateId,
+                  originalText: seamInput.originalText,
+                  preGate: seamInput.preGate.check,
+                  signal: seamInput.signal,
+                  timeoutMs: seamInput.timeoutMs,
+                },
+                {
+                  backend,
+                  executable,
+                  config: snapshot.config.japanese,
+                  checkJapaneseFn: checkJapaneseFn,
+                },
+              );
+              formatterRun = pipelineResult.run;
+              if (!pipelineResult.ok) {
+                // stage 障害は原文維持（outcome failed。第26.3章）。
+                return {
+                  failed: { code: pipelineResult.code, message: pipelineResult.message },
+                };
+              }
+              return pipelineResult.adopted;
+            }
+          : undefined);
+
       const result = await finalizeAssistantMessage({
         message,
         pendingMessages: ctx.hasPendingMessages(),
@@ -653,8 +748,8 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         ledger,
         maxSourceBytes: snapshot.config.japanese.maxSourceBytes,
         // 採用シーム: mode 表（第13章）に従い、pre gate の後で trigger を評価して
-        // から Formatter（mock seam）を起動する。OFF / mode off / trigger 不成立 /
-        // pre gate 不使用では Formatter を開始しない（原文維持）。
+        // から Formatter（注入 seam または pipeline）を起動する。OFF / mode off /
+        // trigger 不成立 / pre gate 不使用では Formatter を開始しない（原文維持）。
         finalize: async (input) => {
           if (!preGateCurrent) {
             // pre gate 実行中に設定が変わった（OFF / mode 変更 / reload）。
@@ -676,6 +771,13 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
             triggeredResult = false;
             return undefined;
           }
+          if (pre.check.incomplete !== undefined) {
+            // 診断完全性が不明な原文は Formatter に渡さない（第15.1章: pre で
+            // 判明した場合は Formatter を起動せず原文を維持）。
+            formatterDecision = "pre-diagnostics-incomplete";
+            triggeredResult = false;
+            return undefined;
+          }
           const jp = snapshot.config.japanese;
           // trigger と権限は別の状態として評価・表示する（Issue #4 AC）。
           // trigger を先に評価し、permission は finalize 直前だけ確認する。
@@ -692,8 +794,8 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
             formatterDecision = permission.reason;
             return undefined;
           }
-          if (!finalize) {
-            // 権限はあっても backend seam が未提供。ローカル検証のみで留める。
+          if (!finalizeImpl) {
+            // 権限はあっても Formatter 実体が未提供。ローカル検証のみで留める。
             formatterDecision = "formatter-unavailable";
             return undefined;
           }
@@ -727,12 +829,11 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
             },
           });
           try {
-            const adopted = await finalize({
+            return await finalizeImpl({
               ...input,
               signal: stage.signal,
               timeoutMs: formatterTimeoutMs,
             });
-            return adopted;
           } finally {
             stage.dispose();
           }
@@ -787,6 +888,20 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         recordCheck(pi, "auto", preGateText, preCheck, extra);
       }
 
+      // Formatter 実行の provenance（本文とは別記録。Issue #8 AC）。
+      // hash・採用理由・検証状態・呼び出し回数・利用量を本文・診断対象文字列と
+      // 切り離して記録する。
+      if (formatterRun !== undefined) {
+        const candidateRecord = result.candidateId ? ledger.find(result.candidateId) : undefined;
+        pi.appendEntry("pi-quality-flow:formatter", {
+          ...formatterRun,
+          inputHash: candidateRecord?.inputHash,
+          outputHash: candidateRecord?.outputHash,
+          outcome: result.outcome,
+          profile: TECH_MINIMAL_PROFILE_VERSION,
+        });
+      }
+
       // 正常 stop の本文だけを手動 check の対象として追跡する。
       // 置換が成功した場合は採用本文を「現在の final response」とする。
       if (message.stopReason === "stop") {
@@ -802,6 +917,13 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       }
 
       if (result.outcome !== "formatted" || !result.replacement) return undefined;
+      // 通常の rewrite 通知は初期 OFF（設計書 第25章）。本文は通知に含めない。
+      if (snapshot.config.ui.notifyOnRewrite) {
+        const reason = result.reason;
+        const message = `quality-flow: formatter correction adopted (reason=${reason}, verification=post)`;
+        ctx.ui.notify(message, "info");
+        pi.appendEntry("pi-quality-flow:notify", { message, level: "info" });
+      }
       const corrected = replaceSingleTextBlock(
         message,
         result.replacement.textIndex,

@@ -23,6 +23,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { createQualityFlowExtension, type Finalizer } from "../../src/extension.ts";
+import type { FormatterBackendLike } from "../../src/japanese/pipeline.ts";
 import type { QualityFlowConfigStore } from "../../src/config/store.ts";
 import { GATE_BIN } from "./gate-bin.ts";
 import {
@@ -55,6 +56,8 @@ export interface HarnessOptions {
   responses: MockResponse[];
   /** pi-quality-flow へ注入する finalizer。未指定は fail-closed。 */
   finalize?: Finalizer;
+  /** pi-quality-flow へ注入する mock Formatter backend（Issue #8 の pipeline 試験用）。 */
+  backend?: FormatterBackendLike;
   /** 固定版 jp-quality-gate の executable（日本語検証の契約試験用）。 */
   gateExecutable?: string;
   /** pi-quality-flow の global 設定ディレクトリ（テスト隔離用）。未指定は agentDir。 */
@@ -92,6 +95,8 @@ export interface Harness {
   turnMappingEntries: () => Array<Record<string, unknown>>;
   /** pi-quality-flow の check 記録（session entry から復元）。 */
   checkEntries: () => Array<Record<string, unknown>>;
+  /** pi-quality-flow の Formatter 実行記録（session entry から復元）。 */
+  formatterEntries: () => Array<Record<string, unknown>>;
   /** customType で絞った session entry（config / notify / config-problem など）。 */
   typedEntries: (customType: string) => Array<Record<string, unknown>>;
   /** mock provider が受けた request 群。 */
@@ -137,9 +142,11 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
     name: "pi-quality-flow",
     factory: createQualityFlowExtension({
       finalize: options.finalize,
-      // 採用シーム（finalize）は pre gate が使える構成だけを対象にする。
+      backend: options.backend,
+      // 採用シーム（finalize / backend）は pre gate が使える構成だけを対象にする。
       // 契約試験では固定版 binary を既定で渡す。
-      gateExecutable: options.gateExecutable ?? (options.finalize !== undefined ? GATE_BIN : undefined),
+      gateExecutable: options.gateExecutable ??
+        (options.finalize !== undefined || options.backend !== undefined ? GATE_BIN : undefined),
       configAgentDir: options.configAgentDir ?? agentDir,
       configStoreHook: options.configStoreHook,
       checkJapaneseFn: options.checkJapaneseFn,
@@ -161,7 +168,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
   const effectiveGlobalConfig =
     options.globalConfig !== undefined
       ? options.globalConfig
-      : options.finalize !== undefined
+      : options.finalize !== undefined || options.backend !== undefined
         ? APPROVED_FORMATTER_CONFIG
         : undefined;
   if (effectiveGlobalConfig !== undefined) {
@@ -236,6 +243,11 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
       readEntries().filter((e) => e && typeof e === "object" && "candidateId" in e && "turnIndex" in e && !("inputHash" in e)),
     checkEntries: () =>
       readEntries().filter((e) => e && typeof e === "object" && "status" in e && "scope" in e),
+    /** pi-quality-flow:formatter の provenance 記録。 */
+    formatterEntries: () =>
+      readEntries().filter(
+        (e) => e && typeof e === "object" && "requested" in e && "profile" in e,
+      ),
     /** customType で絞った session entry（config / notify / config-problem など）。 */
     typedEntries: (customType: string) =>
       readTypedEntries()
