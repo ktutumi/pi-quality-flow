@@ -59,6 +59,11 @@ export interface QualityFlowOptions {
    * 本番 entry point は渡さない。
    */
   configStoreHook?: (store: QualityFlowConfigStore) => void;
+  /**
+   * checkJapanese の注入点（契約試験専用）。固定版 binary の契約は維持され、
+   * 既定では実物が使われる。遅延 gate fixture の試験で遅延を実装する。
+   */
+  checkJapaneseFn?: typeof checkJapanese;
 }
 
 export type ExtensionOutcome =
@@ -218,6 +223,7 @@ function appendCandidateEntry(pi: ExtensionAPI, record: CandidateRecord): void {
 
 export function createQualityFlowExtension(options: QualityFlowOptions = {}): ExtensionFactory {
   const { finalize, gateExecutable, configStoreHook } = options;
+  const checkJapaneseFn = options.checkJapaneseFn ?? checkJapanese;
   const store = new QualityFlowConfigStore();
   /** session_start 時の解決結果（status / doctor の表示用）。 */
   let resolved: ResolvedConfig | undefined;
@@ -535,7 +541,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
             },
           });
           try {
-            const check = await checkJapanese({
+            const check = await checkJapaneseFn({
               text,
               executable,
               timeoutMs,
@@ -796,7 +802,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
                 notify("no final response to check", "warning");
                 return;
               }
-              const check = await checkJapanese({
+              const check = await checkJapaneseFn({
                 text: lastText,
                 executable,
                 timeoutMs: store.current.config.japanese.deadlineMs,

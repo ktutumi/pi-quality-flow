@@ -73,10 +73,12 @@ export interface HarnessOptions {
   resumeSessionFile?: string;
   /** session_start 追加設定。 */
   thinkingLevel?: "off";
-  /** createAgentSession に渡す session_start event の reason（実モードと同じ契約）。 */
-  sessionStartReason?: "startup" | "new" | "resume" | "fork" | "reload";
   /** settings の追加オーバーライド（compaction 契約試験用）。既定は compaction/retry 無効。 */
   settingsOverrides?: { compaction?: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number } };
+  /** checkJapanese の注入点（遅延 gate fixture の競合試験用）。本番は渡さない。 */
+  checkJapaneseFn?: typeof import("../../src/japanese/service.ts").checkJapanese;
+  /** createAgentSession に渡す session_start event の reason（実モードと同じ契約）。 */
+  sessionStartReason?: "startup" | "new" | "resume" | "fork" | "reload";
   /** 各 event の観測フック（abort / steer のタイミング制御用）。 */
   onEvent?: (event: { type: string; [key: string]: unknown }) => void;
 }
@@ -140,6 +142,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
       gateExecutable: options.gateExecutable ?? (options.finalize !== undefined ? GATE_BIN : undefined),
       configAgentDir: options.configAgentDir ?? agentDir,
       configStoreHook: options.configStoreHook,
+      checkJapaneseFn: options.checkJapaneseFn,
     }),
     hidden: true,
   };
