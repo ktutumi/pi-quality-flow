@@ -48,6 +48,13 @@ export class QualityFlowConfigStore {
     lastChangeReason: "initial",
   };
 
+  /**
+   * 設定が確定（revision が進む）たびに呼ぶ hook。
+   * in-flight の backend work を無効化するための変更境界（Issue #7、第33.1章）。
+ * command / reload / 直接呼び出しのどの経路でも発火する。
+   */
+  onChange: ((snapshot: ConfigSnapshot) => void) | undefined;
+
   get current(): ConfigSnapshot {
     return this.snapshot;
   }
@@ -55,6 +62,7 @@ export class QualityFlowConfigStore {
   /** session_start 等での全再読み込み。解決結果で置き換える。 */
   reload(config: QualityFlowConfig, reason: string): ConfigSnapshot {
     this.snapshot = { config, revision: this.snapshot.revision + 1, lastChangeReason: reason };
+    this.onChange?.(this.snapshot);
     return this.snapshot;
   }
 
@@ -93,6 +101,7 @@ export class QualityFlowConfigStore {
       revision: this.snapshot.revision + 1,
       lastChangeReason: reason,
     };
+    this.onChange?.(this.snapshot);
     return { ok: true, snapshot: this.snapshot };
   }
 }

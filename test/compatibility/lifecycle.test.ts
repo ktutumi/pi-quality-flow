@@ -16,20 +16,17 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  createAgentSessionFromServices,
   createAgentSessionRuntime,
-  createAgentSessionServices,
   ModelRuntime,
   SessionManager,
-  SettingsManager,
   type AgentSession,
   type InlineExtension,
   type ModelRuntime as ModelRuntimeType,
-  type SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
 import { createQualityFlowExtension } from "../../src/extension.ts";
 import { isEligibleTerminalCandidate, sha256Utf8, MAX_SOURCE_BYTES } from "../../src/pi/adapter.ts";
-import { createHarness, createMockModel, APPROVED_FORMATTER_CONFIG } from "../helpers/harness.ts";
+import { createHarness, APPROVED_FORMATTER_CONFIG } from "../helpers/harness.ts";
+import { createRuntimeSessionFactory } from "../helpers/runtime-session.ts";
 import { GATE_BIN } from "../helpers/gate-bin.ts";
 import {
   createMockProviderExtension,
@@ -248,58 +245,29 @@ test("session 切替: runtime newSession / fork で session_start reason が届�
       },
     };
 
-    const createRuntime = async ({
-      cwd: runCwd,
-      sessionManager,
-      sessionStartEvent,
-    }: {
-      cwd: string;
-      sessionManager: SessionManager;
-      sessionStartEvent?: SessionStartEvent;
-    }) => {
-      const services = await createAgentSessionServices({
-        cwd: runCwd,
-        agentDir,
-        settingsManager: SettingsManager.inMemory({
-          compaction: { enabled: false },
-          retry: { enabled: false },
-        }),
-        modelRuntime,
-        resourceLoaderOptions: {
-          systemPromptOverride: () => "You are a test assistant.",
-          extensionFactories: [
-            trustProbe,
-            {
-              name: "pi-qf-mock-provider",
-              hidden: true,
-              factory: createMockProviderExtension({ script: () => script }),
-            },
-            {
-              name: "pi-quality-flow",
-              hidden: true,
-              factory: createQualityFlowExtension({
-                finalize: ({ originalText }) => (originalText === ORIGINAL ? ADOPTED : undefined),
-                // 採用シームは pre gate が使える構成だけを対象にする。
-                gateExecutable: GATE_BIN,
-                configAgentDir: agentDir,
-              }),
-            },
-          ],
+    const createRuntime = createRuntimeSessionFactory({
+      cwd,
+      agentDir,
+      modelRuntime,
+      buildExtensionFactories: () => [
+        trustProbe,
+        {
+          name: "pi-qf-mock-provider",
+          hidden: true,
+          factory: createMockProviderExtension({ script: () => script }),
         },
-      });
-      return {
-        ...(await createAgentSessionFromServices({
-          services,
-          sessionManager,
-          sessionStartEvent,
-          model: createMockModel(),
-          thinkingLevel: "off",
-          tools: [],
-        })),
-        services,
-        diagnostics: services.diagnostics,
-      };
-    };
+        {
+          name: "pi-quality-flow",
+          hidden: true,
+          factory: createQualityFlowExtension({
+            finalize: ({ originalText }) => (originalText === ORIGINAL ? ADOPTED : undefined),
+            // 採用シームは pre gate が使える構成だけを対象にする。
+            gateExecutable: GATE_BIN,
+            configAgentDir: agentDir,
+          }),
+        },
+      ],
+    });
 
     const runtime = await createAgentSessionRuntime(createRuntime, {
       cwd,

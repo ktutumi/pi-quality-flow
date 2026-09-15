@@ -39,6 +39,16 @@ export type Finalizer = (input: {
   originalText: string;
   /** claim 後・採用判断前に実行された pre gate の結果。 */
   preGate?: CheckJapaneseResult;
+  /**
+   * Formatter stage の abort signal（Issue #7、設計書 第32.3章）。
+   * candidate / japanese 予算の期限切れ、user cancel（Escape）、
+   * session 切替・設定変更による無効化で abort する。実装はこの signal を
+   * backend（model request）へ伝播し、実停止させなければならない。
+   * deadline 後の返り値は遅延結果として破棄される。
+   */
+  signal?: AbortSignal;
+  /** signal と同じ予算計算に基づく stage 許可時間（ms）。 */
+  timeoutMs?: number;
 }) => string | undefined | Promise<string | undefined>;
 
 export interface QualityFlowOptions {
@@ -98,6 +108,12 @@ export async function finalizeAssistantMessage(input: {
    * 1回だけ実行する（重複 event による複数回 CLI 呼び出しを防ぐ）。
    */
   preGate?: (text: string) => Promise<CheckJapaneseResult>;
+  /**
+   * Formatter stage の中断・期限切れ分類（Issue #7）。finalize の await 後に呼ぶ。
+   * cancelled → outcome cancelled、timeout → outcome failed（原文維持、
+   * post gate / 再要求なし）。遅延結果は破棄される（第32.2章・第33.3章）。
+   */
+  classifyFinalizeStage?: () => "cancelled" | "timeout" | undefined;
   /**
    * 待機中 continuation の現在値（各 await 後・採用直前に再検査）。
    * Pi の steer は abort signal を発火させないため、開始時の snapshot だけでは
@@ -166,11 +182,39 @@ export async function finalizeAssistantMessage(input: {
     };
   }
 
-  const adopted = await finalize({
-    candidateId: record.candidateId,
-    originalText: eligibility.text,
-    preGate: preGateResult,
-  });
+  // Formatter stage の中断・期限切れ（Issue #7）: stage 開始前・実行中の
+  // いずれも signal で検出し、遅延結果を破棄する（有効性確認と反映を同じ
+  // 直列化区間で行う。第33.2章）。以後の stage（post gate / 再要求）は開始しない。
+  const stageAbortResult = (): FinalizeResult | undefined => {
+    const finalizeStageOutcome = input.classifyFinalizeStage?.();
+    if (finalizeStageOutcome === "cancelled") {
+      ledger.commit(record, "skipped", "cancelled");
+      return { outcome: "cancelled", reason: "formatter-cancelled", candidateId: record.candidateId };
+    }
+    if (finalizeStageOutcome === "timeout") {
+      ledger.commit(record, "failed", "formatter-deadline");
+      return { outcome: "failed", reason: "formatter-deadline", candidateId: record.candidateId };
+    }
+    return undefined;
+  };
+
+  let adopted: string | undefined;
+  try {
+    adopted = await finalize({
+      candidateId: record.candidateId,
+      originalText: eligibility.text,
+      preGate: preGateResult,
+    });
+  } catch (error) {
+    // signal abort による seam の reject（AbortError 等）も分類対象。
+    // 中断・期限切れなら遅延結果を破棄し、candidate に終了記録を付ける。
+    // abort 以外の backend error は従来どおり伝播する（握りつぶさない）。
+    const aborted = stageAbortResult();
+    if (aborted) return aborted;
+    throw error;
+  }
+  const finalizedAbort = stageAbortResult();
+  if (finalizedAbort) return finalizedAbort;
   if (input.hasPendingMessages?.()) {
     // finalize 実行中に steer / follow-up が届いた。採用判断の直前にも再検査する
     // （有効性確認と反映を同じ直列化区間で行う。設計書 第33.2章）。
@@ -432,9 +476,40 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
 
   return (pi: ExtensionAPI) => {
     const ledger = new CandidateLedger();
+
+    /**
+     * candidate 無効化 signal（Issue #7、設計書 第33.1章）。
+     * session 切替 / 設定変更 / OFF で abort し、処理中の backend work を
+     * 実停止させる。abort 後は新しい candidate 用に作り直す
+     * （旧 signal は abort 済みのまま残る）。
+     *
+     * 新 candidate 確定時・threshold compaction 時の明示的な無効化配線は
+     * 不要である（Pi 0.85.1 の拡張 event は直列 await される:
+     * agent-session.js は emitMessageEnd を await し、runner も handler を
+     * 直列実行するため、旧 candidate の処理中に新 candidate の claim や
+     * compaction は始まらない）。手動 compaction は先に session.abort() する
+     * （agent-session.js teardown 経路）ため、ctx.signal 経由で停止する。
+     */
+    let invalidation = new AbortController();
+    const invalidateWork = () => {
+      invalidation.abort("invalidated");
+      invalidation = new AbortController();
+    };
+    // 設定の確定（command / reload / hook からの直接変更）は常に in-flight の
+    // backend work を無効化する（store 変更境界）。
+    store.onChange = invalidateWork;
+
+    // session 切替（new / fork / resume 等）の teardown で旧 session の処理を
+    // 無効化する（session_start は新しい instance で発火するため、旧 instance は
+    // session_shutdown だけで観測できる）。
+    pi.on("session_shutdown", () => {
+      invalidateWork();
+    });
+
     configStoreHook?.(store);
 
     pi.on("session_start", (event, ctx) => {
+      invalidateWork();
       ledger.beginSession(ctx.sessionManager.getSessionId());
       // session switch / new / fork で旧 final response を破棄する（Issue #7 の先取り）。
       lastFinalText = undefined;
@@ -500,6 +575,9 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       /** 期限切れ・中断の区別（Issue #7 AC）。 */
       let budgetExpiry: BudgetExpiry | undefined;
       let userCancelled = false;
+      /** Formatter stage の期限切れ・中断（Issue #7）。 */
+      let formatterExpiry: BudgetExpiry | undefined;
+      let formatterCancelled = false;
 
       /** pre gate（原文の検証）。claim 後に 1 回だけ実行される。
        *  各 await 後の有効性検査（Issue #4）: 完了後に設定が変わっていたら
@@ -507,9 +585,11 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
       let preGateRunner: ((text: string) => Promise<CheckJapaneseResult>) | undefined;
       if (decision.run && executable) {
         preGateRunner = async (text) => {
-          // ユーザー中断済み（Escape）の turn では stage を開始しない
+          // 無効化（session / 設定変更）と user cancel（Escape）を合成して検査する。
+          const external = combineSignals(ctx.signal, invalidation.signal);
+          // ユーザー中断済み（Escape）や無効化済みの turn では stage を開始しない
           // （設計書 第32.2章: user cancel は pipeline を始めない）。
-          if (ctx.signal?.aborted) {
+          if (external.aborted) {
             userCancelled = true;
             const check: CheckJapaneseResult = { ok: false, code: "cancelled" };
             preCheck = check;
@@ -532,7 +612,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
           }
           const stage = createStageController({
             budget,
-            external: ctx.signal,
+            external,
             onExpiry: (expiry) => {
               budgetExpiry = expiry;
             },
@@ -575,7 +655,7 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         // 採用シーム: mode 表（第13章）に従い、pre gate の後で trigger を評価して
         // から Formatter（mock seam）を起動する。OFF / mode off / trigger 不成立 /
         // pre gate 不使用では Formatter を開始しない（原文維持）。
-        finalize: (input) => {
+        finalize: async (input) => {
           if (!preGateCurrent) {
             // pre gate 実行中に設定が変わった（OFF / mode 変更 / reload）。
             // 以後の stage（Formatter）を開始しない（設計書 第33.2章）。
@@ -617,9 +697,61 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
             formatterDecision = "formatter-unavailable";
             return undefined;
           }
-          return finalize(input);
+          // Formatter stage（Issue #7、第32.1〜32.3章）: 開始前に無効化と残り
+          // 予算を確認し、実行中の backend には deadline / user cancel / 無効化
+          // を signal で伝播する（実停止。第32.3章）。
+          const external = combineSignals(ctx.signal, invalidation.signal);
+          if (external.aborted) {
+            formatterCancelled = true;
+            formatterDecision = "formatter-cancelled";
+            return undefined;
+          }
+          const formatterTimeoutMs = budget.stageTimeoutMs(
+            snapshot.config.japanese.formatter.timeoutMs,
+            Date.now(),
+          );
+          if (formatterTimeoutMs === undefined) {
+            // 期限後は次 stage を開始しない（第32.1章）。
+            formatterExpiry = budget.expired(Date.now());
+            formatterDecision = "formatter-deadline";
+            return undefined;
+          }
+          const stage = createStageController({
+            budget,
+            external,
+            onExpiry: (expiry) => {
+              formatterExpiry = expiry;
+            },
+            onCancel: () => {
+              formatterCancelled = true;
+            },
+          });
+          try {
+            const adopted = await finalize({
+              ...input,
+              signal: stage.signal,
+              timeoutMs: formatterTimeoutMs,
+            });
+            return adopted;
+          } finally {
+            stage.dispose();
+          }
         },
-        // pre gate は candidate 単位で claim 後に 1 回だけ実行される。
+        classifyFinalizeStage: () => {
+          // timer tick の監視間隔内に返った結果も期限超過として破棄する
+          // （採用判断の直前で wall-clock で再検査する。第32.1章）。
+          const expiry = formatterExpiry ?? budget.expired(Date.now());
+          if (expiry !== undefined) {
+            formatterExpiry = expiry;
+            formatterDecision = "formatter-deadline";
+            return "timeout";
+          }
+          if (formatterCancelled) {
+            formatterDecision = "formatter-cancelled";
+            return "cancelled";
+          }
+          return undefined;
+        },
         preGate: preGateRunner,
         configRevision: snapshot.revision,
         isConfigCurrent: (revision) => store.isCurrent(revision),
@@ -649,6 +781,9 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
         // 中断・期限切れの区別を entry に記録する（Issue #7 AC）。
         if (userCancelled) extra.cancelled = true;
         if (budgetExpiry !== undefined) extra.budgetExpiry = budgetExpiry;
+        // Formatter stage の中断・期限切れも entry に記録する（Issue #7 AC）。
+        if (formatterCancelled) extra.formatterCancelled = true;
+        if (formatterExpiry !== undefined) extra.formatterBudgetExpiry = formatterExpiry;
         recordCheck(pi, "auto", preGateText, preCheck, extra);
       }
 
@@ -830,6 +965,16 @@ export function createQualityFlowExtension(options: QualityFlowOptions = {}): Ex
 }
 
 /** handler 内で参照する実行時の executable（snapshot 不変）。 */
+
+/**
+ * 複数の外部 abort 要因（ctx.signal = user cancel、invalidation = session /
+ * 設定変更）を 1 つの signal に合成する（Issue #7、第32.3章・第33.1章）。
+ * どちらかが abort すると合成 signal も abort する。
+ */
+function combineSignals(a: AbortSignal | undefined, b: AbortSignal): AbortSignal {
+  if (a === undefined) return b;
+  return AbortSignal.any([a, b]);
+}
 
 function recordConfigChange(
   pi: ExtensionAPI,
