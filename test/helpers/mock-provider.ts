@@ -51,6 +51,8 @@ export interface MockResponse {
   chunkCount?: number;
   /** 各 chunk の待ち時間 ms（既定 25）。 */
   chunkDelayMs?: number;
+  /** usage の totalTokens 上書き（compaction 契約試験用）。未指定は 30。 */
+  totalTokens?: number;
 }
 
 export interface MockScript {
@@ -95,6 +97,8 @@ function createMockStream(
   const stream = createAssistantMessageEventStream();
 
   void (async () => {
+    const scriptData = script();
+    const response = scriptData?.responses[state.responsesConsumed];
     const output: AssistantMessage = {
       role: "assistant",
       content: [],
@@ -106,7 +110,7 @@ function createMockStream(
         output: 20,
         cacheRead: 0,
         cacheWrite: 0,
-        totalTokens: 30,
+        totalTokens: response?.totalTokens ?? 30,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       },
       stopReason: "pending",
@@ -114,8 +118,6 @@ function createMockStream(
     };
 
     try {
-      const scriptData = script();
-      const response = scriptData?.responses[state.responsesConsumed];
       state.responsesConsumed += 1;
 
       state.requests.push({

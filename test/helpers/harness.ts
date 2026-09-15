@@ -75,6 +75,8 @@ export interface HarnessOptions {
   thinkingLevel?: "off";
   /** createAgentSession に渡す session_start event の reason（実モードと同じ契約）。 */
   sessionStartReason?: "startup" | "new" | "resume" | "fork" | "reload";
+  /** settings の追加オーバーライド（compaction 契約試験用）。既定は compaction/retry 無効。 */
+  settingsOverrides?: { compaction?: { enabled?: boolean; reserveTokens?: number; keepRecentTokens?: number } };
   /** 各 event の観測フック（abort / steer のタイミング制御用）。 */
   onEvent?: (event: { type: string; [key: string]: unknown }) => void;
 }
@@ -144,7 +146,7 @@ export async function createHarness(options: HarnessOptions): Promise<Harness> {
 
   const settingsManager = SettingsManager.inMemory(
     {
-      compaction: { enabled: false },
+      compaction: { enabled: false, ...options.settingsOverrides?.compaction },
       retry: { enabled: false },
     },
     { projectTrusted: options.projectTrusted ?? false },

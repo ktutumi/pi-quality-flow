@@ -356,6 +356,68 @@ test("session 切替: runtime newSession / fork で session_start reason が届�
   }
 });
 
+test("P06 compaction: threshold compaction で candidate identity が保持される", async () => {
+  // compaction（threshold）を強制する: mock 応答の usage.totalTokens を
+  // compaction 閾値を超える値にする（contextWindow 128000 - reserveTokens 500 =
+  // 127500 より大きいと shouldCompact が成立）。
+  const harnessEvents: Array<{ type: string; [key: string]: unknown }> = [];
+  const harness = await createHarness({
+    responses: [
+      // 1 turn 目: 低 usage（compaction 閾値以下）。
+      { text: "一回目の回答です。", totalTokens: 100 },
+      // 2 turn 目: usage を閾値超えにする（contextWindow 128000 - reserve 500）。
+      { text: ORIGINAL, totalTokens: 127_501 },
+      // compaction の summary 生成用（LLM request。split turn で2回呼ばれる
+      // ため summary 用を2件用意する）。本文は検査しない。
+      { text: "summary of previous conversation" },
+      { text: "summary of previous conversation" },
+    ],
+    finalize: ({ originalText }) => (originalText === ORIGINAL ? ADOPTED : undefined),
+    settingsOverrides: { compaction: { enabled: true, reserveTokens: 500, keepRecentTokens: 1 } },
+    onEvent: (event) => harnessEvents.push(event),
+  });
+  try {
+    await harness.session.prompt("1つ目の質問");
+    await harness.session.prompt("2つ目の質問");
+
+    // compaction の start / end を観測する（reason は threshold）。
+    const start = harnessEvents.find((e) => e.type === "compaction_start");
+    const end = harnessEvents.find((e) => e.type === "compaction_end");
+    assert.ok(start, "compaction_start が届く");
+    assert.equal(start.reason, "threshold");
+    assert.ok(end, "compaction_end が届く");
+    assert.equal(end.reason, "threshold");
+    assert.equal(end.aborted, false, "compaction は完了");
+    const result = end.result as { estimatedTokensAfter?: number } | undefined;
+    assert.ok(result?.estimatedTokensAfter !== undefined, "compaction 結果に tokensAfter がある");
+    assert.ok(
+      (result?.estimatedTokensAfter ?? Infinity) < 127_501,
+      "compaction 後の context は閾値以下に収まる",
+    );
+
+    // compaction が発生したことの証跡（session entry に compaction がある）。
+    const compactionEntries = harness.session.sessionManager
+      .getEntries()
+      .filter((e) => e.type === "compaction");
+    assert.ok(compactionEntries.length > 0, "threshold compaction が実行された");
+
+    // candidate 記録は compaction によって失われない（identity の保持）。
+    // 別 candidate（1 turn 目と 2 turn 目）は別 candidateId で記録される。
+    const candidates = harness.candidateEntries();
+    assert.equal(candidates.length, 2, "2 candidate 分の記録が保持される");
+    const ids = new Set(candidates.map((c) => c.candidateId));
+    assert.equal(ids.size, 2, "candidateId は重複しない");
+    const target = candidates.find((c) => c.inputHash === sha256Utf8(ORIGINAL));
+    assert.ok(target, "対象 candidate が記録されている");
+    assert.equal(target.phase, "formatted", "採用判断は保持される");
+    assert.equal(target.outputHash, sha256Utf8(ADOPTED), "outputHash も保持される");
+    // summary 生成で mock provider が呼ばれた（2 turn 応答 + summary 2件）。
+    assert.equal(harness.mockState.requests.length, 4, "summary 生成の request を観測");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 // --- helpers ---
 
 function collectAssistantMessages(harness: { session: AgentSession }) {
