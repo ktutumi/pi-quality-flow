@@ -17,6 +17,7 @@ import {
   splitSentences,
   TECH_MINIMAL_PROFILE_VERSION,
 } from "../../src/japanese/semantic-risk.ts";
+import { prepareEditableDocument } from "../../src/japanese/editable-document.ts";
 
 function riskOf(original: string, corrected: string) {
   const result = verifySemanticRisk(
@@ -141,7 +142,43 @@ test("sentinel 断片の混入を拒否する", () => {
 test("diffChangedRegions は複数の変更点を分離する", () => {
   const regions = diffChangedRegions("方案あ方案い方案う", "方針あ方針い方針う");
   assert.equal(regions.length, 3);
-  assert.deepEqual(regions[0], { del: "案", ins: "針" });
+  assert.deepEqual(regions[0], { start: 1, del: "案", ins: "針" });
+});
+
+test("degree 助詞・核助詞同時置換・文の並べ替え・有効無効の反転を拒否する", () => {
+  expectReject("数分ほど待機します。", "数分くらい待機します。", "particle-change");
+  expectReject("犬がいる。", "犬をみる。", "particle-change");
+  expectReject("設定は有効です。", "設定は無効です。", "risk-word-change");
+  expectReject("成功します。", "失敗します。", "risk-word-change");
+  expectReject("送信します。保存します。", "保存します。送信します。", "sentence-structure-changed");
+});
+
+test("ラベル付き前置きの挿入を marker 一覧外でも拒否する", () => {
+  const original = "この実装方案では、返却値を直接利用します。";
+  // 文頭追加（marker 一覧外の「修正版:」）
+  expectReject(original, "修正版:この実装方案では、返却値を直接利用します。", "commentary-inserted");
+  // 段落内挿入
+  expectReject(original, "この実装方案では、修正版:返却値を直接利用します。", "commentary-inserted");
+  // 「（校正後）」のような前置きは文頭ルールが先に分類する（挿入上限より先）
+  expectReject("本文です。", "（校正後）本文です。", "commentary-inserted");
+});
+
+test("sentinel 境界をまたぐ文字の再配分を拒否する", () => {
+  const risk = (a: string, b: string) => {
+    const docA = prepareEditableDocument(a);
+    const docB = prepareEditableDocument(b);
+    assert.ok(docA.supported && docB.supported);
+    return verifySemanticRisk(docA, docB);
+  };
+  const r1 = risk("項目`API`説明", "項`API`目説明");
+  assert.ok(!r1.ok);
+  assert.equal(r1.code, "boundary-redistribution");
+  const r2 = risk("あ`x`いう。", "あい`x`う。");
+  assert.ok(!r2.ok);
+  assert.equal(r2.code, "boundary-redistribution");
+  // 片側だけの境界隣接修正（誤字修正）は許可する
+  assert.ok(risk("項目`API`説明", "項目`API`解説").ok);
+  assert.ok(risk("`API`方案の返却", "`API`方針の返却").ok);
 });
 
 test("splitSentences は文末記号と改行で分割する", () => {
@@ -149,13 +186,18 @@ test("splitSentences は文末記号と改行で分割する", () => {
   assert.deepEqual(splitSentences("行1\n行2\n"), ["行1\n", "行2\n"]);
 });
 
-test("hasParticleChange は助詞 run のみを検出する", () => {
-  assert.equal(hasParticleChange("が"), true);
-  assert.equal(hasParticleChange("のは"), true);
-  assert.equal(hasParticleChange("から"), true);
-  assert.equal(hasParticleChange("ました"), false);
-  assert.equal(hasParticleChange("など"), true);
-  assert.equal(hasParticleChange("もの"), false);
+test("hasParticleChange は純助詞 run と核助詞の先頭ペアを検出する", () => {
+  assert.equal(hasParticleChange("が", ""), true);
+  assert.equal(hasParticleChange("", "のは"), true);
+  assert.equal(hasParticleChange("ほど", "くらい"), true);
+  assert.equal(hasParticleChange("ました", "しました"), false);
+  assert.equal(hasParticleChange("など", ""), true);
+  assert.equal(hasParticleChange("もの", ""), false);
+  // 助詞と語句の同時置換（主体・対象の反転）: 先頭核助詞が異なる組
+  assert.equal(hasParticleChange("がい", "をみ"), true);
+  // 同じ核助詞のままの変更は助詞変更として扱わない
+  assert.equal(hasParticleChange("がい", "がなる"), false);
+  assert.equal(hasParticleChange("まし", "しまし"), false);
 });
 
 test("profile version は固定値として公開する", () => {

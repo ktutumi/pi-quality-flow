@@ -26,6 +26,7 @@ const NO_IMPROVE = { ...ADOPTION, acceptImprovement: false };
 const FORBID_UNIHAN = { ...ADOPTION, forbidNewRules: ["simplified_chinese_form"] };
 
 const VERSION = "unicode=18.0.0,cjclassifier=1.0.5";
+const POLICY = "test-policy/tech-minimal-v1";
 
 function check(
   overrides: Partial<GateCheck> & Pick<GateCheck, "status" | "score">,
@@ -38,6 +39,7 @@ function check(
     score: { errors: overrides.score.errors, warnings: overrides.score.warnings },
     binaryVersion: overrides.binaryVersion ?? VERSION,
     incomplete: overrides.incomplete,
+    policyDigest: overrides.policyDigest ?? POLICY,
   };
 }
 
@@ -170,6 +172,16 @@ test("診断不完全・policy 不一致は第4行で拒否する", () => {
   assert.equal(
     decide({ pre, post: scopePost }).reason,
     "gate-unusable:scope-mismatch",
+  );
+  // 比較 policy（policyDigest）の不一致も第4行で拒否する。
+  const policyPost = check({
+    status: "pass",
+    score: { errors: 0, warnings: 0 },
+    policyDigest: "test-policy/tech-minimal-v2",
+  });
+  assert.equal(
+    decide({ pre, post: policyPost }).reason,
+    "gate-unusable:policy-mismatch",
   );
 });
 

@@ -43,6 +43,7 @@ const passGate: CheckJapaneseResult = {
     scope: "editable-prose",
     diagnostics: [],
     score: { errors: 0, warnings: 0 },
+    policyDigest: "test-policy/tech-minimal-v1",
   },
 };
 

@@ -75,6 +75,9 @@ export function decideAdoption(input: AdoptionInputs): AdoptionDecision {
   if (pre.scope !== post.scope) {
     return original(`gate-unusable:scope-mismatch`);
   }
+  if (pre.policyDigest !== post.policyDigest) {
+    return original(`gate-unusable:policy-mismatch`);
+  }
 
   // 5: 新規 error、または forbidNewRules の新規診断（multiset 比較）。
   const newForbidden = findNewDiagnostics(pre.diagnostics, post.diagnostics, config);

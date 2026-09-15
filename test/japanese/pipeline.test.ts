@@ -37,6 +37,7 @@ const PASS: CheckJapaneseResult = {
     diagnostics: [],
     score: { errors: 0, warnings: 0 },
     binaryVersion: VERSION,
+    policyDigest: "test-policy/tech-minimal-v1",
   },
 };
 
@@ -49,6 +50,7 @@ function fail(errors: number, warnings: number): CheckJapaneseResult {
       diagnostics: [],
       score: { errors, warnings },
       binaryVersion: VERSION,
+      policyDigest: "test-policy/tech-minimal-v1",
     },
   };
 }

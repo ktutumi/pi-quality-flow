@@ -91,18 +91,23 @@ function unchanged(reason: string, candidateId: string): FormatterPipelineResult
   };
 }
 
-/** 不合格の修正案の拒否（原文維持、model request は実行済み）。 */
+/** 不合格の修正案の拒否（原文維持、model request は実行済み）。決定表第3行を
+ *  decideAdoption に通して判断する（ロジックを pipeline 側に複製しない）。 */
 function rejectedProposal(
-  reason: string,
+  invariantViolation: string,
+  input: FormatterPipelineInput,
+  context: FormatterPipelineContext,
+  finishRun: (base: Omit<FormatterRunRecord, "candidateId" | "latencyMs" | "preCheck">) => FormatterRunRecord,
   requested: Pick<FormatterRunRecord, "requested" | "backendCode" | "model" | "usage" | "requestBytes">,
-  finishRun: (base: Omit<FormatterRunRecord, "candidateId" | "latencyMs">) => FormatterRunRecord,
 ): FormatterPipelineResult {
+  const decision = decideAdoption({
+    pre: input.preGate,
+    invariantViolation,
+    config: context.config.adoption,
+  });
   return {
     ok: true,
-    run: finishRun({
-      ...requested,
-      decision: { result: "original", reason, verification: "pre" },
-    }),
+    run: finishRun({ ...requested, decision }),
   };
 }
 
@@ -161,26 +166,34 @@ export async function runFormatterPipeline(
   // sentinel 検査と復元（第21.2・21.3章: 衝突・集合・個数・順序・所属の検査）。
   const restoredCheck = verifyAndRestore(rewrite.text, protectedRequest.request);
   if (!restoredCheck.ok) {
-    return rejectedProposal(`unsafe-rewrite:${restoredCheck.code}`, requested, finishRun);
+    return rejectedProposal(restoredCheck.code, input, context, finishRun, requested);
   }
   const restored = restoredCheck.restored;
 
   // 復元後の構造不変条件（保護 byte 列・segment 対応・Markdown 構造）。
   const structural = verifyRestoredStructure(doc, restored);
   if (!structural.ok) {
-    return rejectedProposal(`unsafe-rewrite:${structural.code}`, requested, finishRun);
+    return rejectedProposal(structural.code, input, context, finishRun, requested);
   }
 
   // 意味変更リスク検査（否定・助詞・変更量・レビュー文・文境界）。
   // 記録する reason は code のみ（detail は変更文字を含むため本文と同様に保存しない）。
   const semantic = verifySemanticRisk(doc, structural.doc);
   if (!semantic.ok) {
-    return rejectedProposal(`unsafe-rewrite:${semantic.code}`, requested, finishRun);
+    return rejectedProposal(semantic.code, input, context, finishRun, requested);
   }
 
   // 無変更は post gate を実行しない（CLI 呼び出しの上限は pre/post 各最大1回）。
+  // 修正案が原文と同一であることは決定表第7行の「同一本文なら unchanged」に
+  // 当たるため、ここで原文維持として打ち切る（post gate 省略）。
   if (restored === originalText) {
-    return rejectedProposal("no-change", requested, finishRun);
+    return {
+      ok: true,
+      run: finishRun({
+        ...requested,
+        decision: { result: "original", reason: "no-change", verification: "pre" },
+      }),
+    };
   }
 
   // post gate（同じ scope と policy）。stage の残り時間で実行する。

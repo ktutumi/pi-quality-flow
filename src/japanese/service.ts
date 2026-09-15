@@ -13,6 +13,7 @@ import { buildGateProjection, prepareEditableDocument } from "./editable-documen
 import { codePointOffsetToUtf16, normalizeDiagnostic, type GateDiagnostic } from "../jpqg/diagnostics.ts";
 import type { GateScore } from "../jpqg/score.ts";
 import { PINNED_GATE_SHA256, runGate, verifyExecutableDigest, type GateFailureCode } from "../jpqg/runner.ts";
+import { TECH_MINIMAL_PROFILE_VERSION } from "./semantic-risk.ts";
 import type { ParsedGateReport } from "../jpqg/schema.ts";
 
 /** 編集可能 prose の診断（原文座標、UTF-16 code unit）。 */
@@ -32,6 +33,11 @@ export interface GateCheck {
   binaryVersion?: string;
   /** 診断の完全性が不明な場合の理由（採用判断には使えない）。 */
   incomplete?: "gate-diagnostics-incomplete";
+  /**
+   * 比較 policy の識別（固定版 binary digest + profile version）。
+   * pre/post の policyDigest が異なる結果は比較しない（設計書 第12.3章）。
+   */
+  policyDigest: string;
 }
 
 export type CheckJapaneseResult =
@@ -163,6 +169,7 @@ export async function checkJapanese(options: CheckJapaneseOptions): Promise<Chec
       score: run.report.score,
       binaryVersion: run.report.binaryVersion,
       incomplete,
+      policyDigest: `${PINNED_GATE_SHA256}/${TECH_MINIMAL_PROFILE_VERSION}`,
     },
   };
 }
@@ -178,6 +185,7 @@ function skipped(
       reason,
       diagnostics: [],
       score: { errors: 0, warnings: 0 },
+      policyDigest: `${PINNED_GATE_SHA256}/${TECH_MINIMAL_PROFILE_VERSION}`,
     },
   };
 }

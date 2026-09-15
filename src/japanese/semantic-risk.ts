@@ -47,13 +47,16 @@ export type SemanticRiskCode =
   | "particle-change"
   | "risk-word-change"
   | "commentary-inserted"
-  | "sentinel-fragment";
+  | "sentinel-fragment"
+  | "boundary-redistribution";
 
 export type SemanticRiskResult =
   | { ok: true }
   | { ok: false; code: SemanticRiskCode; detail?: string };
 
 export interface ChangeRegion {
+  /** 変更開始位置（原文・修正案共通の code point offset）。 */
+  start: number;
   /** 削除された原文側の text（空なら純挿入）。 */
   del: string;
   /** 挿入された修正案側の text（空なら純削除）。 */
@@ -76,17 +79,18 @@ export function diffChangedRegions(a: string, b: string): ChangeRegion[] {
   const midB = B.slice(start, endB).join("");
   if (midA === "" && midB === "") return [];
   // 差分が大きい segment は広範な変更として上限検査に渡す（LCS を展開しない）。
-  if (midA.length > MAX_DIFF_LENGTH || midB.length > MAX_DIFF_LENGTH) {
-    return [{ del: midA, ins: midB }];
+  // 比較は code point 単位（A / B は code point 配列）。
+  if (endA - start > MAX_DIFF_LENGTH || endB - start > MAX_DIFF_LENGTH) {
+    return [{ start, del: midA, ins: midB }];
   }
-  return lcsChangedRegions(A.slice(start, endA), B.slice(start, endB));
+  return lcsChangedRegions(A.slice(start, endA), B.slice(start, endB), start);
 }
 
 /** LCS diff の展開上限（code points）。これを超える差分は単一 region として扱う。 */
-const MAX_DIFF_LENGTH = 1000;
+const MAX_DIFF_LENGTH = 400;
 
-/** code point 単位の LCS diff。連続する非一致を1つの region にまとめる。 */
-function lcsChangedRegions(A: string[], B: string[]): ChangeRegion[] {
+/** code point 単位の LCS diff。連続する非一致を1つの region にまとめ、offset を保持する。 */
+function lcsChangedRegions(A: string[], B: string[], base: number): ChangeRegion[] {
   const n = A.length;
   const m = B.length;
   const width = m + 1;
@@ -102,10 +106,15 @@ function lcsChangedRegions(A: string[], B: string[]): ChangeRegion[] {
   const regions: ChangeRegion[] = [];
   let del = "";
   let ins = "";
+  let open = false;
+  let regionStart = 0;
   const flush = (): void => {
-    if (del.length > 0 || ins.length > 0) regions.push({ del, ins });
+    if (open && (del.length > 0 || ins.length > 0)) {
+      regions.push({ start: base + regionStart, del, ins });
+    }
     del = "";
     ins = "";
+    open = false;
   };
   let i = 0;
   let j = 0;
@@ -114,11 +123,21 @@ function lcsChangedRegions(A: string[], B: string[]): ChangeRegion[] {
       flush();
       i++;
       j++;
-    } else if (dp[(i + 1) * width + j] >= dp[i * width + j + 1]) {
-      del += A[i++];
     } else {
-      ins += B[j++];
+      if (!open) {
+        open = true;
+        regionStart = i;
+      }
+      if (dp[(i + 1) * width + j] >= dp[i * width + j + 1]) {
+        del += A[i++];
+      } else {
+        ins += B[j++];
+      }
     }
+  }
+  if (!open && (i < n || j < m)) {
+    open = true;
+    regionStart = i;
   }
   while (i < n) del += A[i++];
   while (j < m) ins += B[j++];
@@ -142,20 +161,47 @@ export function splitSentences(text: string): string[] {
 }
 
 /**
- * 変更が助詞のみからなる場合に true（Issue #9 の許可パターン導入まで拒否）。
- * 助詞の単体・複合の並びに一致する run を検査する。 amounted など助詞文字を
- * 含む一般語（例: 「もの」「ました」）は一致しない。
+ * 助詞変更の検査（Issue #9 の許可パターン導入まで拒否）。
+ *
+ * 1. 単体・複合助詞のみからなる kana run の一致（純助詞の挿入・削除・置換）。
+ *    主体・対象を変えない一般語（例: 「もの」「ました」「しますた」）は一致しない。
+ * 2. 削除側と挿入側の先頭 kana run が異なる核助詞ではじまる組
+ *    （例: 「がい」→「をみ」）。助詞と語句の同時置換による主体/対象の反転を検出する。
  */
 const PARTICLES = new Set([
   "は", "が", "を", "に", "で", "と", "も", "へ", "の", "や", "か", "ね", "よ", "な", "わ", "け",
+  "ほど", "くらい", "ぐらい", "ごろ", "ころ",
   "から", "まで", "より", "って", "には", "では", "への", "との", "での", "ので",
   "のに", "のは", "のが", "のを", "のも", "にも", "でも", "とも", "とは",
   "など", "しか", "こそ", "けど", "のみ", "ばかり", "けれど",
 ]);
 
-export function hasParticleChange(text: string): boolean {
-  const runs = text.match(/[ぁ-ゖ]+/g) ?? [];
-  return runs.some((run) => PARTICLES.has(run));
+/** 主体・対象を反転させ得る核助詞（run 先頭での比較に使う）。 */
+const CORE_PARTICLE_CHARS = "がをはにでの";
+
+function kanaRuns(text: string): string[] {
+  return text.match(/[ぁ-ゖ]+/g) ?? [];
+}
+
+/** 先頭が核助詞ではじまる kana run（2 code points 以上）の先頭助詞。 */
+function leadingCoreParticle(text: string): string | undefined {
+  const run = text.match(/^[ぁ-ゖ]+/)?.[0];
+  if (run === undefined || [...run].length < 2) return undefined;
+  const first = [...run][0];
+  return CORE_PARTICLE_CHARS.includes(first) ? first : undefined;
+}
+
+export function hasParticleChange(del: string, ins: string): boolean {
+  // 純助詞の run（例: 「が」「のは」「ほど」）の出入り。
+  if (kanaRuns(del).some((run) => PARTICLES.has(run))) return true;
+  if (kanaRuns(ins).some((run) => PARTICLES.has(run))) return true;
+  // 助詞と語句の同時置換（例: 「がい」→「をみ」）: 両側の先頭核助詞が異なるなら反転。
+  const delLead = leadingCoreParticle(del);
+  const insLead = leadingCoreParticle(ins);
+  if (delLead !== undefined && insLead !== undefined && delLead !== insLead) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -163,7 +209,7 @@ export function hasParticleChange(text: string): boolean {
  * 削除側にだけ / 挿入側にだけ現れるトークンがある場合は意味変更リスクとして拒否。
  */
 const RISK_TOKENS: ReadonlyArray<{ category: string; tokens: readonly string[] }> = [
-  { category: "negation", tokens: ["ない", "ません", "なかった", "ぬ", "ず", "無し", "不可", "禁止", "できな", "らない", "れない", "あり得ない"] },
+  { category: "negation", tokens: ["ない", "ません", "なかった", "ぬ", "ず", "無し", "不可", "禁止", "できな", "らない", "れない", "あり得ない", "無効", "有効", "成功", "失敗"] },
   { category: "necessity", tokens: ["必須", "必要", "必ず", "任意", "推奨", "望ましい", "すべき", "なければ", "なくては"] },
   { category: "comparison", tokens: ["未満", "以下", "以上", "超過", "超える", "超す", "最大", "最小", "少なくとも", "増加", "減少", "増える", "減る"] },
   { category: "condition", tokens: ["場合", "とき", "時に", "条件", "もし", "ならば", "すれば", "ついて", "関して", "すると"] },
@@ -249,7 +295,7 @@ function changedRiskCategory(del: string, ins: string): string | undefined {
 }
 
 /** 1つの変更 region の検査 第1段（境界文字・レビュー文・前置き）。 */
-function checkRegionCommentary(region: ChangeRegion):
+function checkRegionCommentary(region: ChangeRegion, segmentText: string):
   | { ok: true }
   | { ok: false; code: SemanticRiskCode; detail: string } {
   const { del, ins } = region;
@@ -276,6 +322,16 @@ function checkRegionCommentary(region: ChangeRegion):
   if ([...del].length === 0 && [...ins].length >= 2 && POLITE_SUFFIX.test(ins)) {
     return { ok: false, code: "commentary-inserted", detail: `polite-suffix:${ins}` };
   }
+  // ラベル付き前置き（「修正版:」等）: 挿入が文境界の直後にあり、かつ
+  // 2 code points 以上、あるいは末尾が区切り記号（: ：）で終わる。
+  if ([...del].length === 0 && [...ins].length >= 2) {
+    const atSentenceStart =
+      region.start === 0 || SENTENCE_CHARS.has([...segmentText][region.start - 1] ?? "");
+    const labeledSuffix = /(?:[：:]$)/.test(ins);
+    if (atSentenceStart || labeledSuffix) {
+      return { ok: false, code: "commentary-inserted", detail: `prefixed:${ins}` };
+    }
+  }
   return { ok: true };
 }
 
@@ -288,7 +344,7 @@ function checkRegionChange(region: ChangeRegion):
   if (!limit.ok) return { ok: false, code: "change-limit-exceeded", detail: limit.detail };
 
   // 助詞変更（Issue #9 の許可パターン導入まで拒否）。
-  if (hasParticleChange(region.del) || hasParticleChange(region.ins)) {
+  if (hasParticleChange(region.del, region.ins)) {
     return { ok: false, code: "particle-change", detail: `${region.del}→${region.ins}` };
   }
   return { ok: true };
@@ -306,6 +362,8 @@ export function verifySemanticRisk(
   if (original.segments.length !== corrected.segments.length) {
     return { ok: false, code: "sentence-structure-changed", detail: "segment-count" };
   }
+  /** 変更が segment 境界に触れた位置（隣接 pair の再配分検査に使う）。 */
+  const boundaryEdits = new Map<number, { start: boolean; end: boolean }>();
   for (let s = 0; s < original.segments.length; s++) {
     const a = original.segments[s].text;
     const b = corrected.segments[s].text;
@@ -315,6 +373,11 @@ export function verifySemanticRisk(
     const correctedSentences = splitSentences(b);
     if (originalSentences.length !== correctedSentences.length) {
       return { ok: false, code: "sentence-structure-changed", detail: `segment ${s}` };
+    }
+    // 文の並べ替え（再配置）: 同じ文の集合が異なる順で現れたら拒否する
+    // （設計書 第22.2章: 文や段落の再配置の拒否）。同一文の入れ替えは無害。
+    if (reordered(originalSentences, correctedSentences)) {
+      return { ok: false, code: "sentence-structure-changed", detail: `segment ${s}: reorder` };
     }
 
     const regions = diffChangedRegions(a, b);
@@ -334,9 +397,10 @@ export function verifySemanticRisk(
       return { ok: false, code: "change-limit-exceeded", detail: `segment ${s}: ${total} points` };
     }
 
-    // region 単位の検査 第1段（境界文字・レビュー文・前置き）。
+    // region 単位の検査 第1段（境界文字・レビュー文・前置き）。文の始まり
+    // 直後の挿入は位置情報を使うため segment 本文を渡す。
     for (const region of regions) {
-      const violation = checkRegionCommentary(region);
+      const violation = checkRegionCommentary(region, a);
       if (!violation.ok) {
         return { ok: false, code: violation.code, detail: `segment ${s}: ${violation.detail}` };
       }
@@ -360,6 +424,54 @@ export function verifySemanticRisk(
         return { ok: false, code: violation.code, detail: `segment ${s}: ${violation.detail}` };
       }
     }
+
+    // sentinel 境界をまたぐ文字の再配分を検出する（設計書 第21.2章:
+    // 所属 block / segment 境界の維持）。隣接する 2 segment が、
+    // 片側の末尾と他方の先頭で同時に変わった場合は文字が境界を超えて移動
+    // している（例: 「項目`c`説明」→「項`c`目説明」）。
+    boundaryEdits.set(s, boundaryTouches(regions, [...a].length));
+  }
+  const ordered = [...boundaryEdits.entries()].sort((x, y) => x[0] - y[0]);
+  for (let i = 1; i < ordered.length; i++) {
+    const [prev, prevEdit] = ordered[i - 1];
+    const [curr, currEdit] = ordered[i];
+    if (curr === prev + 1 && prevEdit.end && currEdit.start) {
+      return {
+        ok: false,
+        code: "boundary-redistribution",
+        detail: `segments ${prev}/${curr}`,
+      };
+    }
   }
   return { ok: true };
+}
+
+/** 同じ文の集合が異なる順序で現れたか（再配置の検出）。 */
+function reordered(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      const sortedA = [...a].sort();
+      const sortedB = [...b].sort();
+      return sortedA.every((v, k) => v === sortedB[k]);
+    }
+  }
+  return false;
+}
+
+/**
+ * region が segment の先頭・末尾境界に触れているか
+ * （sentinel をはさんだ再配分の検出に使う）。
+ */
+function boundaryTouches(regions: readonly ChangeRegion[], chunkLength: number): { start: boolean; end: boolean } {
+  let touchesStart = false;
+  let touchesEnd = false;
+  for (const region of regions) {
+    const delLen = [...region.del].length;
+    const insLen = [...region.ins].length;
+    if (region.start === 0) touchesStart = true;
+    if (region.start + delLen === chunkLength) touchesEnd = true;
+    if (delLen === 0 && insLen > 0 && region.start === chunkLength) touchesEnd = true;
+  }
+  return { start: touchesStart, end: touchesEnd };
 }
